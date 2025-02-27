@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>实时音高监测</title>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        width: 100%;
+        font-family: Arial, sans-serif;
+      }
+      
+      #chart-container {
+        width: 100%;
+        height: 70%;
+      }
+      
+      .controls {
+        padding: 10px;
+        text-align: center;
+      }
+      
+      #pitch {
+        font-size: 24px;
+        margin: 10px 0;
+      }
+      
+      button {
+        padding: 8px 16px;
+        margin: 0 10px;
+        cursor: pointer;
+      }
+      
+      .settings {
+        margin: 10px 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      
+      .settings label {
+        margin-right: 10px;
+      }
+      
+      .settings input {
+        width: 60px;
+        padding: 5px;
+        margin-right: 10px;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  </head>
+  <body>
+    <div id="chart-container"></div>
+    <div class="controls">
+      <div id="pitch">等待检测音高...</div>
+      <div class="settings">
+        <label for="standardA">标准音A (Hz):</label>
+        <input type="number" id="standardA" value="440" min="400" max="500" step="1">
+        <button id="updateA">更新</button>
+      </div>
+      <button id="startButton">开始检测</button>
+      <button id="stopButton" disabled>停止检测</button>
+    </div>
+    
+    <script type="module">
+      import aubioModule from "https://unpkg.com/aubiojs@0.2.1/build/aubio.esm.js";
+      
+      let audioContext, analyser, microphone, scriptProcessor;
+      let isRunning = false;
+      let chart;
+      let pitchData = [];
+      let noteData = [];
+      const maxPoints = 100;
+      const maxFrequency = 2000;
+      const bufferSize = 1 << 12;
+      let standardA = 440; // 标准音A的频率，默认440Hz
+      
+      // 音符名称数组
+      const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+      
+      // 将频率转换为音符名称
+      function frequencyToNote(frequency) {
+        if (!frequency) return "";
+        
+        // 计算与A4（标准音A）的半音差
+        const a4 = standardA; // A4频率
+        const semitoneRatio = Math.pow(2, 1/12);
+        
+        // 计算与A4的半音数差异
+        const semitonesFromA4 = Math.round(12 * Math.log2(frequency / a4));
+        
+        // 计算音高名称和八度
+        const octave = Math.floor((semitonesFromA4 + 9) / 12) + 4; // A4的9是从C0开始的偏移
+        const noteIndex = (semitonesFromA4 + 9) % 12; // 加9是为了从C开始
+        
+        // 获取音符名称
+        const noteName = noteNames[noteIndex >= 0 ? noteIndex : noteIndex + 12];
+        
+        return `${noteName}${octave}`;
+      }
+      
+      // 初始化ECharts
+      function initChart() {
+        chart = echarts.init(document.getElementById('chart-container'));
+        
+        const option = {
+          title: {
+            text: '实时音高监测'
+          },
+          tooltip: {
+            trigger: 'axis',
+            formatter: function(params) {
+              const index = params[0].dataIndex;
+              const freq = pitchData[index] || 0;
+              const note = noteData[index] || '';
+              return `频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}`;
+            }
+          },
+          grid: {
+            left: '5%',
+            right: '5%',
+            bottom: '10%',
+            containLabel: true
+          },
+          xAxis: {
+            type: 'category',
+            data: Array.from({length: maxPoints}, (_, i) => i),
+            name: '时间'
+          },
+          yAxis: [
+            {
+              type: 'value',
+              name: '频率 (Hz)',
+              min: 0,
+              max: 1000,
+              position: 'left',
+              axisLine: {
+                show: true,
+                lineStyle: {
+                  color: '#5470C6'
+                }
+              },
+              axisLabel: {
+                formatter: '{value} Hz'
+              }
+            },
+            {
+              type: 'category',
+              name: '音高',
+              position: 'right',
+              offset: 0,
+              axisLine: {
+                show: true,
+                lineStyle: {
+                  color: '#91CC75'
+                }
+              },
+              axisTick: {
+                show: false
+              },
+              axisLabel: {
+                interval: 0
+              },
+              data: generateNoteScale()
+            }
+          ],
+          series: [{
+            name: '音高',
+            type: 'line',
+            smooth: true,
+            data: Array(maxPoints).fill(0),
+            itemStyle: {
+              color: '#5470C6'
+            },
+            areaStyle: {
+              color: {
+                type: 'linear',
+                x: 0,
+                y: 0,
+                x2: 0,
+                y2: 1,
+                colorStops: [
+                  {offset: 0, color: 'rgba(84, 112, 198, 0.5)'},
+                  {offset: 1, color: 'rgba(84, 112, 198, 0.1)'}
+                ]
+              }
+            }
+          }]
+        };
+        
+        chart.setOption(option);
+        window.addEventListener('resize', () => chart.resize());
+      }
+      
+      // 生成音高刻度
+      function generateNoteScale() {
+        const notes = [];
+        const minFreq = 100; // 最低频率
+        const maxFreq = 1000; // 最高频率
+        
+        // 生成从C2到C6的音符
+        for (let octave = 2; octave <= 6; octave++) {
+          for (let noteIdx = 0; noteIdx < noteNames.length; noteIdx++) {
+            const note = noteNames[noteIdx] + octave;
+            const freq = noteToFrequency(noteIdx, octave);
+            
+            if (freq >= minFreq && freq <= maxFreq) {
+              notes.push(note);
+            }
+          }
+        }
+        
+        return notes;
+      }
+      
+      // 从音符和八度计算频率
+      function noteToFrequency(noteIndex, octave) {
+        // A4 = 标准音A (默认440Hz)
+        // 计算与A4的半音差
+        const a4Index = 9; // A在音符数组中的索引
+        const a4Octave = 4; // A4的八度
+        
+        const semitonesFromA4 = (octave - a4Octave) * 12 + (noteIndex - a4Index);
+        
+        // 使用平均律计算频率
+        return standardA * Math.pow(2, semitonesFromA4 / 12);
+      }
+      
+      // 更新图表数据
+      function updateChart(frequency) {
+        const note = frequencyToNote(frequency);
+        
+        pitchData.push(frequency || 0);
+        noteData.push(note);
+        
+        if (pitchData.length > maxPoints) {
+          pitchData.shift();
+          noteData.shift();
+        }
+        
+        chart.setOption({
+          series: [{
+            data: pitchData
+          }]
+        });
+      }
+      
+      // 更新标准音A
+      function updateStandardA() {
+        const newValue = parseFloat(document.getElementById('standardA').value);
+        if (!isNaN(newValue) && newValue >= 400 && newValue <= 500) {
+          standardA = newValue;
+          
+          // 如果图表已初始化，则更新Y轴的音高刻度
+          if (chart) {
+            chart.setOption({
+              yAxis: [
+                {},
+                {
+                  data: generateNoteScale()
+                }
+              ]
+            });
+          }
+          
+          // 清空数据重新开始
+          pitchData = [];
+          noteData = [];
+        }
+      }
+      
+      // 开始检测
+      async function startDetection() {
+        if (isRunning) return;
+        
+        try {
+          // 请求麦克风访问权限
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          
+          // 创建音频上下文
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          microphone = audioContext.createMediaStreamSource(stream);
+          scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+          microphone.connect(scriptProcessor);
+          scriptProcessor.connect(audioContext.destination);
+          
+          // 使用Aubio检测音高
+          const aubio = await aubioModule();
+          const pitchDetector = new aubio.Pitch(
+            "fcomb",
+            scriptProcessor.bufferSize * 4,
+            scriptProcessor.bufferSize,
+            audioContext.sampleRate
+          );
+          
+          scriptProcessor.addEventListener("audioprocess", function(event) {
+            if (!isRunning) return;
+            
+            const data = event.inputBuffer.getChannelData(0);
+            const frequency = pitchDetector.do(data);
+            
+            if (frequency) {
+              const note = frequencyToNote(frequency);
+              document.getElementById('pitch').innerHTML = `当前音高: ${frequency.toFixed(1)} Hz (${note})`;
+              updateChart(frequency);
+            }
+          });
+          
+          isRunning = true;
+          document.getElementById('startButton').disabled = true;
+          document.getElementById('stopButton').disabled = false;
+          
+        } catch (error) {
+          console.error("无法访问麦克风:", error);
+          alert("无法访问麦克风: " + error.message);
+        }
+      }
+      
+      // 停止检测
+      function stopDetection() {
+        if (!isRunning) return;
+        
+        isRunning = false;
+        
+        if (scriptProcessor) {
+          scriptProcessor.disconnect();
+        }
+        
+        if (microphone) {
+          microphone.disconnect();
+        }
+        
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+        
+        document.getElementById('startButton').disabled = false;
+        document.getElementById('stopButton').disabled = true;
+        document.getElementById('pitch').innerHTML = "等待检测音高...";
+      }
+      
+      // 初始化页面
+      document.addEventListener('DOMContentLoaded', () => {
+        initChart();
+        document.getElementById('startButton').addEventListener('click', startDetection);
+        document.getElementById('stopButton').addEventListener('click', stopDetection);
+        document.getElementById('updateA').addEventListener('click', updateStandardA);
+      });
+    </script>
+  </body>
+</html>

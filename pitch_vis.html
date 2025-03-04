@@ -62,6 +62,28 @@
       </div>
       <button id="startButton">开始检测</button>
       <button id="stopButton" disabled>停止检测</button>
+      <div class="settings" style="margin-top: 15px;">
+        <label for="audioFile">上传音频文件:</label>
+        <input type="file" id="audioFile" accept="audio/*">
+        <button id="analyzeButton">分析音频</button>
+      </div>
+      <div class="settings" style="margin-top: 15px;">
+        <details>
+          <summary>高级设置</summary>
+          <div style="margin-top: 10px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
+            <div>
+              <label for="confidenceThreshold">置信度阈值:</label>
+              <input type="range" id="confidenceThreshold" min="0" max="1" step="0.01" value="0.01">
+              <span id="confidenceValue">0.01</span>
+            </div>
+            <div>
+              <label for="medianFilterSize">平滑度:</label>
+              <input type="range" id="medianFilterSize" min="1" max="15" step="2" value="5">
+              <span id="filterValue">5</span>
+            </div>
+          </div>
+        </details>
+      </div>
     </div>
     
     <script type="module">
@@ -76,6 +98,9 @@
       const maxFrequency = 2000;
       const bufferSize = 1 << 12;
       let standardA = 440; // 标准音A的频率，默认440Hz
+      let audioBuffer = null; // 存储上传的音频文件
+      let confidenceThreshold = 0.01; // 音高检测的置信度阈值，大幅降低以捕获更多数据点
+      let medianFilterSize = 5; // 中值滤波器大小
       
       // 音符名称数组
       const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -113,7 +138,7 @@
             trigger: 'axis',
             formatter: function(params) {
               const index = params[0].dataIndex;
-              const freq = pitchData[index] || 0;
+              const freq = params[0].data || 0;
               const note = noteData[index] || '';
               return `频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}`;
             }
@@ -131,11 +156,12 @@
           },
           yAxis: [
             {
-              type: 'value',
+              type: 'log',  // 使用对数坐标
               name: '频率 (Hz)',
-              min: 0,
-              max: 1000,
+              min: 50,      // 最低频率设为50Hz，约等于G1音
+              max: 2000,    // 最高频率设为2000Hz，约等于B6音
               position: 'left',
+              logBase: 2,   // 以2为底的对数，符合音乐中八度的关系
               axisLine: {
                 show: true,
                 lineStyle: {
@@ -144,26 +170,13 @@
               },
               axisLabel: {
                 formatter: '{value} Hz'
-              }
-            },
-            {
-              type: 'category',
-              name: '音高',
-              position: 'right',
-              offset: 0,
-              axisLine: {
+              },
+              splitLine: {
                 show: true,
                 lineStyle: {
-                  color: '#91CC75'
+                  type: 'dashed'
                 }
-              },
-              axisTick: {
-                show: false
-              },
-              axisLabel: {
-                interval: 0
-              },
-              data: generateNoteScale()
+              }
             }
           ],
           series: [{
@@ -186,7 +199,8 @@
                   {offset: 1, color: 'rgba(84, 112, 198, 0.1)'}
                 ]
               }
-            }
+            },
+            connectNulls: true // 连接空值点
           }]
         };
         
@@ -196,19 +210,13 @@
       
       // 生成音高刻度
       function generateNoteScale() {
+        // 生成从C2到C7的音符刻度
         const notes = [];
-        const minFreq = 100; // 最低频率
-        const maxFreq = 1000; // 最高频率
+        const baseNotes = ["C", "D", "E", "F", "G", "A", "B"];
         
-        // 生成从C2到C6的音符
-        for (let octave = 2; octave <= 6; octave++) {
-          for (let noteIdx = 0; noteIdx < noteNames.length; noteIdx++) {
-            const note = noteNames[noteIdx] + octave;
-            const freq = noteToFrequency(noteIdx, octave);
-            
-            if (freq >= minFreq && freq <= maxFreq) {
-              notes.push(note);
-            }
+        for (let octave = 2; octave <= 7; octave++) {
+          for (let i = 0; i < baseNotes.length; i++) {
+            notes.push(`${baseNotes[i]}${octave}`);
           }
         }
         
@@ -217,34 +225,62 @@
       
       // 从音符和八度计算频率
       function noteToFrequency(noteIndex, octave) {
-        // A4 = 标准音A (默认440Hz)
+        // A4 = 440Hz
+        const A4Index = 9; // A在一个八度中的索引
+        const A4Octave = 4; // 标准音A所在的八度
+        
         // 计算与A4的半音差
-        const a4Index = 9; // A在音符数组中的索引
-        const a4Octave = 4; // A4的八度
+        const semitonesFromA4 = (octave - A4Octave) * 12 + (noteIndex - A4Index);
         
-        const semitonesFromA4 = (octave - a4Octave) * 12 + (noteIndex - a4Index);
-        
-        // 使用平均律计算频率
+        // 每个半音的频率比是 2^(1/12)
         return standardA * Math.pow(2, semitonesFromA4 / 12);
       }
       
-      // 更新图表数据
-      function updateChart(frequency) {
-        const note = frequencyToNote(frequency);
+      // 获取音符对应的Y轴位置
+      function getNoteYPosition(note) {
+        if (!note) return null;
         
-        pitchData.push(frequency || 0);
+        // 解析音符名称，例如"C4"
+        const noteName = note.slice(0, -1);
+        const octave = parseInt(note.slice(-1));
+        
+        // 查找音符在音符数组中的索引
+        const noteIndex = noteNames.indexOf(noteName);
+        if (noteIndex === -1) return null;
+        
+        // 计算频率
+        const frequency = noteToFrequency(noteIndex, octave);
+        return frequency;
+      }
+      
+      // 更新图表数据
+      function updateChart(frequency, note) {
+        // 更新数据数组
+        pitchData.push(frequency);
         noteData.push(note);
         
+        // 保持数组长度不超过最大点数
         if (pitchData.length > maxPoints) {
           pitchData.shift();
           noteData.shift();
         }
         
-        chart.setOption({
-          series: [{
-            data: pitchData
-          }]
-        });
+        // 更新图表
+        const option = chart.getOption();
+        
+        // 更新tooltip formatter为实时模式
+        option.tooltip = {
+          trigger: 'axis',
+          formatter: function(params) {
+            const index = params[0].dataIndex;
+            const freq = pitchData[index] || 0;
+            const note = noteData[index] || '';
+            return `频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}`;
+          }
+        };
+        
+        option.series[0].data = pitchData;
+        chart.setOption(option);
       }
       
       // 更新标准音A
@@ -272,7 +308,7 @@
       }
       
       // 开始检测
-      async function startDetection() {
+      async function startPitchDetection() {
         if (isRunning) return;
         
         try {
@@ -295,18 +331,48 @@
             audioContext.sampleRate
           );
           
-          scriptProcessor.addEventListener("audioprocess", function(event) {
+          // 设置置信度阈值
+          if (pitchDetector.setTolerance) {
+            pitchDetector.setTolerance(1.0 - confidenceThreshold);
+          }
+          
+          // 用于平滑处理的历史频率数据
+          const freqHistory = [];
+          
+          scriptProcessor.onaudioprocess = function(event) {
             if (!isRunning) return;
             
-            const data = event.inputBuffer.getChannelData(0);
-            const frequency = pitchDetector.do(data);
+            const audioData = event.inputBuffer.getChannelData(0);
+            const frequency = pitchDetector.do(audioData);
+            const confidence = pitchDetector.getConfidence ? pitchDetector.getConfidence() : 1.0;
             
-            if (frequency) {
-              const note = frequencyToNote(frequency);
-              document.getElementById('pitch').innerHTML = `当前音高: ${frequency.toFixed(1)} Hz (${note})`;
-              updateChart(frequency);
+            // 只处理置信度高于阈值的结果
+            if (frequency > 0 && confidence >= confidenceThreshold) {
+              // 添加到历史数据
+              freqHistory.push(frequency);
+              
+              // 保持历史数据长度
+              if (freqHistory.length > medianFilterSize) {
+                freqHistory.shift();
+              }
+              
+              // 应用中值滤波
+              let smoothedFreq = frequency;
+              if (freqHistory.length >= 3) {
+                const sortedFreqs = [...freqHistory].sort((a, b) => a - b);
+                smoothedFreq = sortedFreqs[Math.floor(sortedFreqs.length / 2)];
+              }
+              
+              const note = frequencyToNote(smoothedFreq);
+              document.getElementById('pitch').innerHTML = 
+                `当前音高: ${smoothedFreq.toFixed(1)} Hz (${note})<br>置信度: ${confidence.toFixed(2)}`;
+              updateChart(smoothedFreq, note);
+            } else {
+              // 低置信度的情况
+              document.getElementById('pitch').innerHTML = 
+                `信号不稳定 (置信度: ${confidence.toFixed(2)})`;
             }
-          });
+          };
           
           isRunning = true;
           document.getElementById('startButton').disabled = true;
@@ -319,7 +385,7 @@
       }
       
       // 停止检测
-      function stopDetection() {
+      function stopPitchDetection() {
         if (!isRunning) return;
         
         isRunning = false;
@@ -342,12 +408,331 @@
         document.getElementById('pitch').innerHTML = "等待检测音高...";
       }
       
+      // 处理文件选择
+      function handleFileSelect(event) {
+        const file = event.target.files[0];
+        if (file) {
+          document.getElementById('analyzeButton').disabled = false;
+        }
+      }
+      
+      // 分析上传的音频文件
+      async function analyzeAudioFile() {
+        const fileInput = document.getElementById('audioFile');
+        const file = fileInput.files[0];
+        
+        if (!file) {
+          alert('请先选择一个音频文件');
+          return;
+        }
+        
+        // 停止当前的麦克风检测
+        if (isRunning) {
+          stopPitchDetection();
+        }
+        
+        // 重置图表数据
+        pitchData = [];
+        noteData = [];
+        
+        // 显示加载状态
+        document.getElementById('pitch').innerHTML = "正在分析音频文件...";
+        
+        try {
+          // 创建AudioContext（如果不存在）
+          if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          
+          // 读取文件
+          const arrayBuffer = await file.arrayBuffer();
+          
+          // 解码音频数据
+          audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          // 分析音频文件
+          const pitchResults = await analyzeAudioBuffer(audioBuffer);
+          
+          // 更新图表
+          updateChartWithFileAnalysis(pitchResults);
+          
+        } catch (error) {
+          console.error('分析音频文件时出错:', error);
+          alert('分析音频文件时出错: ' + error.message);
+        }
+      }
+      
+      // 分析AudioBuffer中的音高
+      async function analyzeAudioBuffer(buffer) {
+        // 初始化Aubio
+        const aubio = await aubioModule();
+        
+        // 创建音高检测器
+        const pitchDetector = new aubio.Pitch(
+          "yinfft", // 使用yinfft算法，通常对音乐信号效果更好
+          bufferSize,
+          Math.floor(bufferSize / 3),
+          buffer.sampleRate
+        );
+        
+        // 设置置信度阈值
+        if (pitchDetector.setTolerance) {
+          pitchDetector.setTolerance(1.0 - confidenceThreshold);
+        }
+        
+        const results = {
+          times: [],
+          frequencies: [],
+          notes: [],
+          confidences: []
+        };
+        
+        // 分析整个音频文件
+        const channels = buffer.numberOfChannels;
+        const audioData = buffer.getChannelData(0); // 使用第一个声道
+        const hopSize = Math.floor(bufferSize / 3);
+        const totalFrames = Math.floor(audioData.length / hopSize);
+        
+        console.log(`开始分析音频: 采样率=${buffer.sampleRate}Hz, 通道数=${channels}, 总帧数=${totalFrames}`);
+        
+        // 创建临时Float32Array用于处理
+        const tempBuffer = new Float32Array(bufferSize);
+        let rawFrequencies = [];
+        let rawConfidences = [];
+        
+        for (let i = 0; i < totalFrames; i++) {
+          // 填充临时缓冲区
+          tempBuffer.fill(0);
+          
+          // 复制当前帧的数据到临时缓冲区
+          const startIndex = i * hopSize;
+          const samplesToProcess = Math.min(bufferSize, audioData.length - startIndex);
+          
+          for (let j = 0; j < samplesToProcess; j++) {
+            tempBuffer[j] = audioData[startIndex + j];
+          }
+          
+          // 检测音高
+          const frequency = pitchDetector.do(tempBuffer);
+          const confidence = pitchDetector.getConfidence ? pitchDetector.getConfidence() : 1.0;
+          
+          // 记录原始数据用于调试
+          rawFrequencies.push(frequency);
+          rawConfidences.push(confidence);
+          
+          // 记录时间点
+          const timeInSeconds = startIndex / buffer.sampleRate;
+          results.times.push(timeInSeconds);
+          
+          // 只保留频率大于0的结果，忽略置信度
+          if (frequency > 0) {
+            results.frequencies.push(frequency);
+            results.confidences.push(confidence);
+          } else {
+            // 对于低置信度的结果，频率设为0
+            results.frequencies.push(0);
+            results.confidences.push(confidence);
+          }
+        }
+        
+        // 输出调试信息
+        console.log(`原始频率检测: ${rawFrequencies.filter(f => f > 0).length}/${rawFrequencies.length} 个有效点`);
+        console.log(`置信度分布: 最小=${Math.min(...rawConfidences).toFixed(2)}, 最大=${Math.max(...rawConfidences).toFixed(2)}, 平均=${(rawConfidences.reduce((a, b) => a + b, 0) / rawConfidences.length).toFixed(2)}`);
+        console.log(`应用置信度阈值 ${confidenceThreshold} 后: ${results.frequencies.filter(f => f > 0).length}/${results.frequencies.length} 个有效点`);
+        
+        // 应用中值滤波平滑频率
+        if (medianFilterSize > 1) {
+          const filteredFreqs = medianFilter(results.frequencies, medianFilterSize);
+          results.frequencies = filteredFreqs;
+        }
+        
+        // 计算音符
+        results.notes = results.frequencies.map(freq => freq > 0 ? frequencyToNote(freq) : "");
+        
+        return results;
+      }
+      
+      // 中值滤波函数
+      function medianFilter(array, size) {
+        if (size <= 1 || array.length < size) return array;
+        
+        const result = [];
+        const halfSize = Math.floor(size / 2);
+        
+        for (let i = 0; i < array.length; i++) {
+          const start = Math.max(0, i - halfSize);
+          const end = Math.min(array.length, i + halfSize + 1);
+          const window = array.slice(start, end).filter(val => val > 0);
+          
+          if (window.length === 0) {
+            result.push(array[i]);
+          } else {
+            // 排序并取中值
+            window.sort((a, b) => a - b);
+            const median = window[Math.floor(window.length / 2)];
+            result.push(median);
+          }
+        }
+        
+        return result;
+      }
+      
+      // 使用文件分析结果更新图表
+      function updateChartWithFileAnalysis(results) {
+        // 确保数据非空
+        if (!results.times.length || !results.frequencies.length) {
+          document.getElementById('pitch').innerHTML = "分析未找到有效的音高数据";
+          return;
+        }
+        
+        // 获取有效频率点
+        const validFrequencies = results.frequencies.filter(f => f > 0);
+        
+        if (validFrequencies.length === 0) {
+          document.getElementById('pitch').innerHTML = "分析未找到有效的音高数据，请尝试调整参数或使用其他音频文件";
+          console.log("没有找到有效的频率点");
+          return;
+        }
+        
+        // 打印调试信息
+        console.log(`分析结果: ${results.frequencies.length} 个频率点, ${results.times.length} 个时间点`);
+        console.log(`有效频率点: ${validFrequencies.length} 个`);
+        console.log(`频率范围: ${Math.min(...validFrequencies)} - ${Math.max(...validFrequencies)}`);
+        
+        // 更新图表数据
+        const option = chart.getOption();
+        
+        // 设置X轴为时间
+        option.xAxis[0].type = 'value';
+        option.xAxis[0].name = '时间 (秒)';
+        
+        // 更新Y轴范围
+        if (validFrequencies.length > 0) {
+          const minFreq = Math.max(50, Math.min(...validFrequencies) * 0.9);  // 最小值不低于50Hz
+          const maxFreq = Math.min(5000, Math.max(...validFrequencies) * 1.1); // 最大值不超过5000Hz
+          option.yAxis[0].min = minFreq;
+          option.yAxis[0].max = maxFreq;
+          option.yAxis[0].type = 'log';
+          option.yAxis[0].logBase = 2;
+        }
+        
+        // 创建数据点数组
+        const dataPoints = [];
+        for (let i = 0; i < results.times.length; i++) {
+          if (results.frequencies[i] > 0) {
+            dataPoints.push([results.times[i], results.frequencies[i]]);
+          }
+        }
+        
+        // 更新数据系列
+        option.series[0].data = dataPoints;
+        option.series[0].type = 'scatter';
+        option.series[0].symbolSize = 5;
+        
+        // 添加线系列连接点
+        option.series[1] = {
+          name: '音高线',
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          data: dataPoints,
+          lineStyle: {
+            width: 1,
+            opacity: 0.5
+          }
+        };
+        
+        // 更新tooltip formatter
+        option.tooltip = {
+          trigger: 'item',
+          formatter: function(params) {
+            if (!params || !params.value) return '';
+            
+            const time = params.value[0];
+            const freq = params.value[1];
+            
+            // 找到最接近的时间点
+            let closestIndex = 0;
+            let minDiff = Infinity;
+            for (let i = 0; i < results.times.length; i++) {
+              const diff = Math.abs(results.times[i] - time);
+              if (diff < minDiff) {
+                minDiff = diff;
+                closestIndex = i;
+              }
+            }
+            
+            const note = results.notes[closestIndex] || '';
+            const confidence = results.confidences && results.confidences[closestIndex] ? 
+              `<br/>置信度: ${results.confidences[closestIndex].toFixed(2)}` : '';
+            
+            return `时间: ${time.toFixed(2)} 秒<br/>频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}${confidence}`;
+          }
+        };
+        
+        // 添加音符标注
+        option.series[0].markPoint = {
+          symbol: 'circle',
+          symbolSize: 5,
+          data: []
+        };
+        
+        // 为了避免标注过多，每隔一定间隔添加标注
+        const step = Math.max(1, Math.floor(dataPoints.length / 20));
+        for (let i = 0; i < dataPoints.length; i += step) {
+          const time = dataPoints[i][0];
+          const freq = dataPoints[i][1];
+          
+          // 找到最接近的时间点
+          let closestIndex = 0;
+          let minDiff = Infinity;
+          for (let j = 0; j < results.times.length; j++) {
+            const diff = Math.abs(results.times[j] - time);
+            if (diff < minDiff) {
+              minDiff = diff;
+              closestIndex = j;
+            }
+          }
+          
+          const note = results.notes[closestIndex];
+          if (note) {
+            option.series[0].markPoint.data.push({
+              name: note,
+              value: note,
+              xAxis: time,
+              yAxis: freq
+            });
+          }
+        }
+        
+        // 更新图表
+        chart.setOption(option, true);
+        
+        // 更新当前音高显示
+        const validPoints = results.frequencies.filter(f => f > 0).length;
+        document.getElementById('pitch').innerHTML = `文件分析完成，共检测到 ${validPoints} 个有效音高点`;
+      }
+      
       // 初始化页面
-      document.addEventListener('DOMContentLoaded', () => {
+      document.addEventListener('DOMContentLoaded', function() {
         initChart();
-        document.getElementById('startButton').addEventListener('click', startDetection);
-        document.getElementById('stopButton').addEventListener('click', stopDetection);
+        
+        document.getElementById('startButton').addEventListener('click', startPitchDetection);
+        document.getElementById('stopButton').addEventListener('click', stopPitchDetection);
         document.getElementById('updateA').addEventListener('click', updateStandardA);
+        document.getElementById('analyzeButton').addEventListener('click', analyzeAudioFile);
+        document.getElementById('audioFile').addEventListener('change', handleFileSelect);
+        
+        // 添加事件监听器
+        document.getElementById('confidenceThreshold').addEventListener('input', function(e) {
+          confidenceThreshold = parseFloat(e.target.value);
+          document.getElementById('confidenceValue').textContent = confidenceThreshold.toFixed(2);
+        });
+        
+        document.getElementById('medianFilterSize').addEventListener('input', function(e) {
+          medianFilterSize = parseInt(e.target.value);
+          document.getElementById('filterValue').textContent = medianFilterSize;
+        });
       });
     </script>
   </body>

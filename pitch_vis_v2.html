@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>实时音高监测</title>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        width: 100%;
+        font-family: Arial, sans-serif;
+      }
+      
+      #chart-container {
+        width: 100%;
+        height: 70%;
+      }
+      
+      .controls {
+        padding: 10px;
+        text-align: center;
+      }
+      
+      #pitch {
+        font-size: 24px;
+        margin: 10px 0;
+      }
+      
+      button {
+        padding: 8px 16px;
+        margin: 0 10px;
+        cursor: pointer;
+      }
+      
+      .settings {
+        margin: 10px 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      
+      .settings label {
+        margin-right: 10px;
+      }
+      
+      .settings input {
+        width: 60px;
+        padding: 5px;
+        margin-right: 10px;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  </head>
+  <body>
+    <div id="chart-container"></div>
+    <div class="controls">
+      <div id="pitch">等待检测音高...</div>
+      <div class="settings">
+        <label for="standardA">标准音A (Hz):</label>
+        <input type="number" id="standardA" value="440" min="400" max="500" step="1">
+        <button id="updateA">更新</button>
+      </div>
+      <button id="startButton">开始检测</button>
+      <button id="stopButton" disabled>停止检测</button>
+      <div class="settings" style="margin-top: 15px;">
+        <label for="audioFile">上传音频文件:</label>
+        <input type="file" id="audioFile" accept="audio/*">
+        <button id="analyzeButton">分析音频</button>
+      </div>
+      <div class="settings" style="margin-top: 15px;">
+        <details>
+          <summary>高级设置</summary>
+          <div style="margin-top: 10px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
+            <div>
+              <label for="confidenceThreshold">置信度阈值:</label>
+              <input type="range" id="confidenceThreshold" min="0" max="1" step="0.01" value="0.01">
+              <span id="confidenceValue">0.01</span>
+            </div>
+            <div>
+              <label for="medianFilterSize">平滑度:</label>
+              <input type="range" id="medianFilterSize" min="1" max="15" step="2" value="5">
+              <span id="filterValue">5</span>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
+    
+    <script type="module">
+      import aubioModule from "https://unpkg.com/aubiojs@0.2.1/build/aubio.esm.js";
+      
+      let audioContext, analyser, microphone, scriptProcessor;
+      let isRunning = false;
+      let chart;
+      let pitchData = [];
+      let noteData = [];
+      const maxPoints = 100;
+      const maxFrequency = 2000;
+      const bufferSize = 1 << 12;
+      let standardA = 440; // 标准音A的频率，默认440Hz
+      let audioBuffer = null; // 存储上传的音频文件
+      let confidenceThreshold = 0.01; // 音高检测的置信度阈值，大幅降低以捕获更多数据点
+      let medianFilterSize = 5; // 中值滤波器大小
+      
+      // 音符名称数组
+      const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+      
+      // 将频率转换为音符名称
+      function frequencyToNote(frequency) {
+        if (!frequency) return "";
+        
+        // 计算与A4（标准音A）的半音差
+        const a4 = standardA; // A4频率
+        const semitoneRatio = Math.pow(2, 1/12);
+        
+        // 计算与A4的半音数差异
+        const semitonesFromA4 = Math.round(12 * Math.log2(frequency / a4));
+        
+        // 计算音高名称和八度
+        const octave = Math.floor((semitonesFromA4 + 9) / 12) + 4; // A4的9是从C0开始的偏移
+        const noteIndex = (semitonesFromA4 + 9) % 12; // 加9是为了从C开始
+        
+        // 获取音符名称
+        const noteName = noteNames[noteIndex >= 0 ? noteIndex : noteIndex + 12];
+        
+        return `${noteName}${octave}`;
+      }
+      
+      // 初始化ECharts
+      function initChart() {
+        chart = echarts.init(document.getElementById('chart-container'));
+        
+        const option = {
+          title: {
+            text: '实时音高监测'
+          },
+          tooltip: {
+            trigger: 'axis',
+            formatter: function(params) {
+              const index = params[0].dataIndex;
+              const freq = params[0].data || 0;
+              const note = noteData[index] || '';
+              return `频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}`;
+            }
+          },
+          grid: {
+            left: '5%',
+            right: '5%',
+            bottom: '10%',
+            containLabel: true
+          },
+          xAxis: {
+            type: 'category',
+            data: Array.from({length: maxPoints}, (_, i) => i),
+            name: '时间'
+          },
+          yAxis: [
+            {
+              type: 'log',  // 使用对数坐标
+              name: '频率 (Hz)',
+              min: 50,      // 最低频率设为50Hz，约等于G1音
+              max: 2000,    // 最高频率设为2000Hz，约等于B6音
+              position: 'left',
+              logBase: 2,   // 以2为底的对数，符合音乐中八度的关系
+              axisLine: {
+                show: true,
+                lineStyle: {
+                  color: '#5470C6'
+                }
+              },
+              axisLabel: {
+                formatter: '{value} Hz'
+              },
+              splitLine: {
+                show: true,
+                lineStyle: {
+                  type: 'dashed'
+                }
+              }
+            }
+          ],
+          series: [{
+            name: '音高',
+            type: 'line',
+            smooth: true,
+            data: Array(maxPoints).fill(0),
+            itemStyle: {
+              color: '#5470C6'
+            },
+            areaStyle: {
+              color: {
+                type: 'linear',
+                x: 0,
+                y: 0,
+                x2: 0,
+                y2: 1,
+                colorStops: [
+                  {offset: 0, color: 'rgba(84, 112, 198, 0.5)'},
+                  {offset: 1, color: 'rgba(84, 112, 198, 0.1)'}
+                ]
+              }
+            },
+            connectNulls: true // 连接空值点
+          }]
+        };
+        
+        chart.setOption(option);
+        window.addEventListener('resize', () => chart.resize());
+      }
+      
+      // 生成音高刻度
+      function generateNoteScale() {
+        // 生成从C2到C7的音符刻度
+        const notes = [];
+        const baseNotes = ["C", "D", "E", "F", "G", "A", "B"];
+        
+        for (let octave = 2; octave <= 7; octave++) {
+          for (let i = 0; i < baseNotes.length; i++) {
+            notes.push(`${baseNotes[i]}${octave}`);
+          }
+        }
+        
+        return notes;
+      }
+      
+      // 从音符和八度计算频率
+      function noteToFrequency(noteIndex, octave) {
+        // A4 = 440Hz
+        const A4Index = 9; // A在一个八度中的索引
+        const A4Octave = 4; // 标准音A所在的八度
+        
+        // 计算与A4的半音差
+        const semitonesFromA4 = (octave - A4Octave) * 12 + (noteIndex - A4Index);
+        
+        // 每个半音的频率比是 2^(1/12)
+        return standardA * Math.pow(2, semitonesFromA4 / 12);
+      }
+      
+      // 获取音符对应的Y轴位置
+      function getNoteYPosition(note) {
+        if (!note) return null;
+        
+        // 解析音符名称，例如"C4"
+        const noteName = note.slice(0, -1);
+        const octave = parseInt(note.slice(-1));
+        
+        // 查找音符在音符数组中的索引
+        const noteIndex = noteNames.indexOf(noteName);
+        if (noteIndex === -1) return null;
+        
+        // 计算频率
+        const frequency = noteToFrequency(noteIndex, octave);
+        return frequency;
+      }
+      
+      // 更新图表数据
+      function updateChart(frequency, note) {
+        // 更新数据数组
+        pitchData.push(frequency);
+        noteData.push(note);
+        
+        // 保持数组长度不超过最大点数
+        if (pitchData.length > maxPoints) {
+          pitchData.shift();
+          noteData.shift();
+        }
+        
+        // 更新图表
+        const option = chart.getOption();
+        
+        // 更新tooltip formatter为实时模式
+        option.tooltip = {
+          trigger: 'axis',
+          formatter: function(params) {
+            const index = params[0].dataIndex;
+            const freq = pitchData[index] || 0;
+            const note = noteData[index] || '';
+            return `频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}`;
+          }
+        };
+        
+        option.series[0].data = pitchData;
+        chart.setOption(option);
+      }
+      
+      // 更新标准音A
+      function updateStandardA() {
+        const newValue = parseFloat(document.getElementById('standardA').value);
+        if (!isNaN(newValue) && newValue >= 400 && newValue <= 500) {
+          standardA = newValue;
+          
+          // 如果图表已初始化，则更新Y轴的音高刻度
+          if (chart) {
+            chart.setOption({
+              yAxis: [
+                {},
+                {
+                  data: generateNoteScale()
+                }
+              ]
+            });
+          }
+          
+          // 清空数据重新开始
+          pitchData = [];
+          noteData = [];
+        }
+      }
+      
+      // 开始检测
+      async function startPitchDetection() {
+        if (isRunning) return;
+        
+        try {
+          // 请求麦克风访问权限
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          
+          // 创建音频上下文
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          microphone = audioContext.createMediaStreamSource(stream);
+          scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+          microphone.connect(scriptProcessor);
+          scriptProcessor.connect(audioContext.destination);
+          
+          // 使用Aubio检测音高
+          const aubio = await aubioModule();
+          const pitchDetector = new aubio.Pitch(
+            "fcomb",
+            scriptProcessor.bufferSize * 4,
+            scriptProcessor.bufferSize,
+            audioContext.sampleRate
+          );
+          
+          // 创建onset检测器
+          const onsetDetector = new aubio.Onset(
+            "default", // 使用默认算法
+            scriptProcessor.bufferSize * 2,
+            scriptProcessor.bufferSize,
+            audioContext.sampleRate
+          );
+          
+          // 设置置信度阈值
+          if (pitchDetector.setTolerance) {
+            pitchDetector.setTolerance(1.0 - confidenceThreshold);
+          }
+          
+          // 用于平滑处理的历史频率数据
+          const freqHistory = [];
+          
+          // 用于存储实时检测的onset点
+          const realtimeOnsets = [];
+          let lastOnsetTime = 0;
+          
+          // 创建实时检测结果对象
+          const realtimeResults = {
+            times: [],
+            frequencies: [],
+            notes: [],
+            confidences: [],
+            onsets: [] // 新增onset时间点数组
+          };
+          
+          // 开始时间
+          const startTime = audioContext.currentTime;
+          
+          scriptProcessor.onaudioprocess = function(event) {
+            if (!isRunning) return;
+            
+            const audioData = event.inputBuffer.getChannelData(0);
+            const currentTime = audioContext.currentTime - startTime;
+            
+            // 检测onset
+            if (onsetDetector.do(audioData)) {
+              const onsetTime = currentTime;
+              
+              // 防止过于频繁的onset检测（至少间隔100ms）
+              if (onsetTime - lastOnsetTime > 0.1) {
+                lastOnsetTime = onsetTime;
+                realtimeOnsets.push(onsetTime);
+                realtimeResults.onsets.push(onsetTime);
+                
+                // 限制存储的onset数量
+                if (realtimeOnsets.length > 50) {
+                  realtimeOnsets.shift();
+                  realtimeResults.onsets.shift();
+                }
+                
+                // 在控制台显示onset检测
+                console.log(`检测到音频起始点: ${onsetTime.toFixed(2)}秒`);
+                
+                // 更新显示
+                document.getElementById('pitch').innerHTML += `<br>检测到音频起始点: ${onsetTime.toFixed(2)}秒`;
+                
+                // 更新图表中的onset标记
+                updateChartWithOnset(onsetTime);
+              }
+            }
+            
+            // 检测音高
+            const frequency = pitchDetector.do(audioData);
+            const confidence = pitchDetector.getConfidence ? pitchDetector.getConfidence() : 1.0;
+            
+            // 只处理置信度高于阈值的结果
+            if (frequency > 0 && confidence >= confidenceThreshold) {
+              // 添加到历史数据
+              freqHistory.push(frequency);
+              
+              // 保持历史数据长度
+              if (freqHistory.length > medianFilterSize) {
+                freqHistory.shift();
+              }
+              
+              // 应用中值滤波
+              let smoothedFreq = frequency;
+              if (freqHistory.length >= 3) {
+                const sortedFreqs = [...freqHistory].sort((a, b) => a - b);
+                smoothedFreq = sortedFreqs[Math.floor(sortedFreqs.length / 2)];
+              }
+              
+              const note = frequencyToNote(smoothedFreq);
+              document.getElementById('pitch').innerHTML = 
+                `当前音高: ${smoothedFreq.toFixed(1)} Hz (${note})<br>置信度: ${confidence.toFixed(2)}`;
+              
+              // 存储实时检测结果
+              realtimeResults.times.push(currentTime);
+              realtimeResults.frequencies.push(smoothedFreq);
+              realtimeResults.notes.push(note);
+              realtimeResults.confidences.push(confidence);
+              
+              // 限制存储的数据点数量
+              if (realtimeResults.times.length > 1000) {
+                realtimeResults.times.shift();
+                realtimeResults.frequencies.shift();
+                realtimeResults.notes.shift();
+                realtimeResults.confidences.shift();
+              }
+              
+              updateChart(smoothedFreq, note);
+            } else {
+              // 低置信度的情况
+              document.getElementById('pitch').innerHTML = 
+                `信号不稳定 (置信度: ${confidence.toFixed(2)})`;
+            }
+          };
+          
+          isRunning = true;
+          document.getElementById('startButton').disabled = true;
+          document.getElementById('stopButton').disabled = false;
+          
+        } catch (error) {
+          console.error("无法访问麦克风:", error);
+          alert("无法访问麦克风: " + error.message);
+        }
+      }
+      
+      // 停止检测
+      function stopPitchDetection() {
+        if (!isRunning) return;
+        
+        isRunning = false;
+        
+        if (scriptProcessor) {
+          scriptProcessor.disconnect();
+        }
+        
+        if (microphone) {
+          microphone.disconnect();
+        }
+        
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+        
+        document.getElementById('startButton').disabled = false;
+        document.getElementById('stopButton').disabled = true;
+        document.getElementById('pitch').innerHTML = "等待检测音高...";
+      }
+      
+      // 处理文件选择
+      function handleFileSelect(event) {
+        const file = event.target.files[0];
+        if (file) {
+          document.getElementById('analyzeButton').disabled = false;
+        }
+      }
+      
+      // 分析上传的音频文件
+      async function analyzeAudioFile() {
+        const fileInput = document.getElementById('audioFile');
+        const file = fileInput.files[0];
+        
+        if (!file) {
+          alert('请先选择一个音频文件');
+          return;
+        }
+        
+        // 停止当前的麦克风检测
+        if (isRunning) {
+          stopPitchDetection();
+        }
+        
+        // 重置图表数据
+        pitchData = [];
+        noteData = [];
+        
+        // 显示加载状态
+        document.getElementById('pitch').innerHTML = "正在分析音频文件...";
+        
+        try {
+          // 创建AudioContext（如果不存在）
+          if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          
+          // 读取文件
+          const arrayBuffer = await file.arrayBuffer();
+          
+          // 解码音频数据
+          audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          // 分析音频文件
+          const pitchResults = await analyzeAudioBuffer(audioBuffer);
+          
+          // 更新图表
+          updateChartWithFileAnalysis(pitchResults);
+          
+        } catch (error) {
+          console.error('分析音频文件时出错:', error);
+          alert('分析音频文件时出错: ' + error.message);
+        }
+      }
+      
+      // 分析AudioBuffer中的音高
+      async function analyzeAudioBuffer(buffer) {
+        // 初始化Aubio
+        const aubio = await aubioModule();
+        
+        // 创建onset检测器
+        const onsetDetector = new aubio.Onset(
+          "default", // 使用默认算法
+          bufferSize * 2,
+          Math.floor(bufferSize / 3),
+          buffer.sampleRate
+        );
+        
+        // 创建音高检测器
+        const pitchDetector = new aubio.Pitch(
+          "yinfft", // 使用yinfft算法，通常对音乐信号效果更好
+          bufferSize,
+          Math.floor(bufferSize / 3),
+          buffer.sampleRate
+        );
+        
+        // 设置置信度阈值
+        if (pitchDetector.setTolerance) {
+          pitchDetector.setTolerance(1.0 - confidenceThreshold);
+        }
+        
+        const results = {
+          times: [],
+          frequencies: [],
+          notes: [],
+          confidences: [],
+          onsets: [] // 新增onset时间点数组
+        };
+        
+        // 分析整个音频文件
+        const channels = buffer.numberOfChannels;
+        const audioData = buffer.getChannelData(0); // 使用第一个声道
+        const hopSize = Math.floor(bufferSize / 3);
+        const totalFrames = Math.floor(audioData.length / hopSize);
+        
+        console.log(`开始分析音频: 采样率=${buffer.sampleRate}Hz, 通道数=${channels}, 总帧数=${totalFrames}`);
+        
+        // 创建临时Float32Array用于处理
+        const tempBuffer = new Float32Array(bufferSize);
+        
+        // 第一步：检测所有onset点
+        console.log("步骤1: 检测音频起始点(onset)...");
+        const onsetTimes = [];
+        
+        for (let i = 0; i < totalFrames; i++) {
+          // 填充临时缓冲区
+          tempBuffer.fill(0);
+          
+          // 复制当前帧的数据到临时缓冲区
+          const startIndex = i * hopSize;
+          const samplesToProcess = Math.min(bufferSize, audioData.length - startIndex);
+          
+          for (let j = 0; j < samplesToProcess; j++) {
+            tempBuffer[j] = audioData[startIndex + j];
+          }
+          
+          // 检测onset
+          if (onsetDetector.do(tempBuffer)) {
+            const timeInSeconds = startIndex / buffer.sampleRate;
+            onsetTimes.push({
+              time: timeInSeconds,
+              index: startIndex
+            });
+          }
+        }
+        
+        console.log(`检测到 ${onsetTimes.length} 个音频起始点`);
+        results.onsets = onsetTimes.map(onset => onset.time);
+        
+        // 如果没有检测到onset，则添加一个起始点
+        if (onsetTimes.length === 0) {
+          onsetTimes.push({
+            time: 0,
+            index: 0
+          });
+        }
+        
+        // 确保最后一个onset后的音频也被处理
+        onsetTimes.push({
+          time: audioData.length / buffer.sampleRate,
+          index: audioData.length
+        });
+        
+        // 第二步：对每个onset之间的音频段进行音高分析
+        console.log("步骤2: 对每个音频段进行音高分析...");
+        
+        let rawFrequencies = [];
+        let rawConfidences = [];
+        
+        for (let segmentIndex = 0; segmentIndex < onsetTimes.length - 1; segmentIndex++) {
+          const startOnset = onsetTimes[segmentIndex];
+          const endOnset = onsetTimes[segmentIndex + 1];
+          
+          // 计算当前段的起始和结束样本索引
+          const segmentStartIndex = startOnset.index;
+          const segmentEndIndex = endOnset.index;
+          const segmentLength = segmentEndIndex - segmentStartIndex;
+          
+          // 跳过太短的片段
+          if (segmentLength < bufferSize) {
+            console.log(`跳过过短的片段: ${startOnset.time.toFixed(2)}s - ${endOnset.time.toFixed(2)}s (长度: ${segmentLength} 样本)`);
+            continue;
+          }
+          
+          console.log(`分析片段 ${segmentIndex + 1}/${onsetTimes.length - 1}: ${startOnset.time.toFixed(2)}s - ${endOnset.time.toFixed(2)}s (长度: ${segmentLength} 样本)`);
+          
+          // 对当前段进行帧分析
+          const segmentFrames = Math.floor(segmentLength / hopSize);
+          
+          for (let i = 0; i < segmentFrames; i++) {
+            // 填充临时缓冲区
+            tempBuffer.fill(0);
+            
+            // 复制当前帧的数据到临时缓冲区
+            const frameStartIndex = segmentStartIndex + (i * hopSize);
+            const samplesToProcess = Math.min(bufferSize, segmentEndIndex - frameStartIndex);
+            
+            for (let j = 0; j < samplesToProcess; j++) {
+              tempBuffer[j] = audioData[frameStartIndex + j];
+            }
+            
+            // 检测音高
+            const frequency = pitchDetector.do(tempBuffer);
+            const confidence = pitchDetector.getConfidence ? pitchDetector.getConfidence() : 1.0;
+            
+            // 记录原始数据用于调试
+            rawFrequencies.push(frequency);
+            rawConfidences.push(confidence);
+            
+            // 记录时间点
+            const timeInSeconds = frameStartIndex / buffer.sampleRate;
+            results.times.push(timeInSeconds);
+            
+            // 只保留频率大于0的结果，忽略置信度
+            if (frequency > 0) {
+              results.frequencies.push(frequency);
+              results.confidences.push(confidence);
+            } else {
+              // 对于低置信度的结果，频率设为0
+              results.frequencies.push(0);
+              results.confidences.push(confidence);
+            }
+          }
+        }
+        
+        // 输出调试信息
+        console.log(`原始频率检测: ${rawFrequencies.filter(f => f > 0).length}/${rawFrequencies.length} 个有效点`);
+        console.log(`置信度分布: 最小=${Math.min(...rawConfidences).toFixed(2)}, 最大=${Math.max(...rawConfidences).toFixed(2)}, 平均=${(rawConfidences.reduce((a, b) => a + b, 0) / rawConfidences.length).toFixed(2)}`);
+        console.log(`应用置信度阈值 ${confidenceThreshold} 后: ${results.frequencies.filter(f => f > 0).length}/${results.frequencies.length} 个有效点`);
+        
+        // 应用中值滤波平滑频率
+        if (medianFilterSize > 1) {
+          const filteredFreqs = medianFilter(results.frequencies, medianFilterSize);
+          results.frequencies = filteredFreqs;
+        }
+        
+        // 计算音符
+        results.notes = results.frequencies.map(freq => freq > 0 ? frequencyToNote(freq) : "");
+        
+        return results;
+      }
+      
+      // 中值滤波函数
+      function medianFilter(array, size) {
+        if (size <= 1 || array.length < size) return array;
+        
+        const result = [];
+        const halfSize = Math.floor(size / 2);
+        
+        for (let i = 0; i < array.length; i++) {
+          const start = Math.max(0, i - halfSize);
+          const end = Math.min(array.length, i + halfSize + 1);
+          const window = array.slice(start, end).filter(val => val > 0);
+          
+          if (window.length === 0) {
+            result.push(array[i]);
+          } else {
+            // 排序并取中值
+            window.sort((a, b) => a - b);
+            const median = window[Math.floor(window.length / 2)];
+            result.push(median);
+          }
+        }
+        
+        return result;
+      }
+      
+      // 使用文件分析结果更新图表
+      function updateChartWithFileAnalysis(results) {
+        // 确保数据非空
+        if (!results.times.length || !results.frequencies.length) {
+          document.getElementById('pitch').innerHTML = "分析未找到有效的音高数据";
+          return;
+        }
+        
+        // 获取有效频率点
+        const validFrequencies = results.frequencies.filter(f => f > 0);
+        
+        if (validFrequencies.length === 0) {
+          document.getElementById('pitch').innerHTML = "分析未找到有效的音高数据，请尝试调整参数或使用其他音频文件";
+          console.log("没有找到有效的频率点");
+          return;
+        }
+        
+        // 打印调试信息
+        console.log(`分析结果: ${results.frequencies.length} 个频率点, ${results.times.length} 个时间点`);
+        console.log(`有效频率点: ${validFrequencies.length} 个`);
+        console.log(`频率范围: ${Math.min(...validFrequencies)} - ${Math.max(...validFrequencies)}`);
+        console.log(`检测到 ${results.onsets.length} 个音频起始点`);
+        
+        // 更新图表数据
+        const option = chart.getOption();
+        
+        // 设置X轴为时间
+        option.xAxis[0].type = 'value';
+        option.xAxis[0].name = '时间 (秒)';
+        
+        // 更新Y轴范围
+        if (validFrequencies.length > 0) {
+          const minFreq = Math.max(50, Math.min(...validFrequencies) * 0.9);  // 最小值不低于50Hz
+          const maxFreq = Math.min(5000, Math.max(...validFrequencies) * 1.1); // 最大值不超过5000Hz
+          option.yAxis[0].min = minFreq;
+          option.yAxis[0].max = maxFreq;
+          option.yAxis[0].type = 'log';
+          option.yAxis[0].logBase = 2;
+        }
+        
+        // 创建数据点数组
+        const dataPoints = [];
+        for (let i = 0; i < results.times.length; i++) {
+          if (results.frequencies[i] > 0) {
+            dataPoints.push([results.times[i], results.frequencies[i]]);
+          }
+        }
+        
+        // 更新数据系列
+        option.series[0].data = dataPoints;
+        option.series[0].type = 'scatter';
+        option.series[0].symbolSize = 5;
+        
+        // 添加线系列连接点
+        option.series[1] = {
+          name: '音高线',
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          data: dataPoints,
+          lineStyle: {
+            width: 1,
+            opacity: 0.5
+          }
+        };
+        
+        // 添加onset标记系列
+        if (results.onsets && results.onsets.length > 0) {
+          // 创建onset数据点，并为每个onset找到对应的音高
+          const onsetPoints = [];
+          
+          for (let i = 0; i < results.onsets.length; i++) {
+            const onsetTime = results.onsets[i];
+            
+            // 找到最接近onset时间的音高数据点
+            let closestIndex = 0;
+            let minDiff = Infinity;
+            for (let j = 0; j < results.times.length; j++) {
+              // 只考虑onset后的第一个音高点（时间差为正且最小）
+              const timeDiff = results.times[j] - onsetTime;
+              if (timeDiff >= 0 && timeDiff < minDiff) {
+                minDiff = timeDiff;
+                closestIndex = j;
+              }
+            }
+            
+            // 获取对应的音高和音符
+            const freq = results.frequencies[closestIndex] || 0;
+            const note = results.notes[closestIndex] || '';
+            
+            // 只有当找到有效音高时才添加
+            if (freq > 0) {
+              onsetPoints.push({
+                time: onsetTime,
+                freq: freq,
+                note: note
+              });
+            } else {
+              // 如果没有找到有效音高，使用默认值
+              onsetPoints.push({
+                time: onsetTime,
+                freq: 0,
+                note: ''
+              });
+            }
+          }
+          
+          // 添加onset标记系列
+          option.series[2] = {
+            name: '音频起始点',
+            type: 'scatter',
+            symbol: 'triangle',
+            symbolSize: 12,
+            itemStyle: {
+              color: '#ff5722'
+            },
+            data: onsetPoints.map(point => {
+              // 如果有有效频率，使用实际频率；否则使用Y轴中点
+              const yValue = point.freq > 0 ? point.freq : (option.yAxis[0].min + option.yAxis[0].max) / 2;
+              return [point.time, yValue];
+            }),
+            label: {
+              show: true,
+              position: 'top',
+              formatter: function(params) {
+                const index = params.dataIndex;
+                return onsetPoints[index].note;
+              },
+              fontSize: 12,
+              color: '#ff5722',
+              backgroundColor: 'rgba(255,255,255,0.7)',
+              padding: [2, 4],
+              borderRadius: 3
+            },
+            tooltip: {
+              formatter: function(params) {
+                const index = params.dataIndex;
+                const point = onsetPoints[index];
+                let result = `音频起始点: ${point.time.toFixed(2)} 秒`;
+                if (point.freq > 0) {
+                  result += `<br/>频率: ${point.freq.toFixed(1)} Hz`;
+                  if (point.note) {
+                    result += `<br/>音高: ${point.note}`;
+                  }
+                }
+                return result;
+              }
+            }
+          };
+          
+          // 添加onset垂直线
+          option.series[3] = {
+            name: '音频起始线',
+            type: 'line',
+            markLine: {
+              symbol: 'none',
+              silent: true,
+              lineStyle: {
+                color: '#ff5722',
+                type: 'dashed',
+                width: 1
+              },
+              data: results.onsets.map(time => {
+                return [
+                  { xAxis: time, yAxis: option.yAxis[0].min },
+                  { xAxis: time, yAxis: option.yAxis[0].max }
+                ];
+              })
+            },
+            data: []
+          };
+        }
+        
+        // 更新tooltip formatter
+        option.tooltip = {
+          trigger: 'item',
+          formatter: function(params) {
+            if (!params || !params.value) return '';
+            
+            // 如果是onset点
+            if (params.seriesName === '音频起始点') {
+              const index = params.dataIndex;
+              const point = option.series[2].data[index];
+              const time = point[0];
+              const freq = point[1];
+              
+              // 找到最接近的时间点
+              let closestIndex = 0;
+              let minDiff = Infinity;
+              for (let i = 0; i < results.times.length; i++) {
+                const diff = Math.abs(results.times[i] - time);
+                if (diff < minDiff) {
+                  minDiff = diff;
+                  closestIndex = i;
+                }
+              }
+              
+              const note = results.notes[closestIndex] || '';
+              return `音频起始点: ${time.toFixed(2)} 秒<br/>频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}`;
+            }
+            
+            const time = params.value[0];
+            const freq = params.value[1];
+            
+            // 找到最接近的时间点
+            let closestIndex = 0;
+            let minDiff = Infinity;
+            for (let i = 0; i < results.times.length; i++) {
+              const diff = Math.abs(results.times[i] - time);
+              if (diff < minDiff) {
+                minDiff = diff;
+                closestIndex = i;
+              }
+            }
+            
+            const note = results.notes[closestIndex] || '';
+            const confidence = results.confidences && results.confidences[closestIndex] ? 
+              `<br/>置信度: ${results.confidences[closestIndex].toFixed(2)}` : '';
+            
+            return `时间: ${time.toFixed(2)} 秒<br/>频率: ${freq.toFixed(1)} Hz<br/>音高: ${note}${confidence}`;
+          }
+        };
+        
+        // 添加音符标注
+        option.series[0].markPoint = {
+          symbol: 'circle',
+          symbolSize: 5,
+          data: []
+        };
+        
+        // 为了避免标注过多，每隔一定间隔添加标注
+        const step = Math.max(1, Math.floor(dataPoints.length / 20));
+        for (let i = 0; i < dataPoints.length; i += step) {
+          const time = dataPoints[i][0];
+          const freq = dataPoints[i][1];
+          
+          // 找到最接近的时间点
+          let closestIndex = 0;
+          let minDiff = Infinity;
+          for (let j = 0; j < results.times.length; j++) {
+            const diff = Math.abs(results.times[j] - time);
+            if (diff < minDiff) {
+              minDiff = diff;
+              closestIndex = j;
+            }
+          }
+          
+          const note = results.notes[closestIndex];
+          if (note) {
+            option.series[0].markPoint.data.push({
+              name: note,
+              value: note,
+              xAxis: time,
+              yAxis: freq
+            });
+          }
+        }
+        
+        // 更新图表
+        chart.setOption(option, true);
+        
+        // 更新当前音高显示
+        const validPoints = results.frequencies.filter(f => f > 0).length;
+        document.getElementById('pitch').innerHTML = `文件分析完成，共检测到 ${validPoints} 个有效音高点，${results.onsets.length} 个音频起始点`;
+      }
+      
+      // 在实时图表中添加onset标记
+      function updateChartWithOnset(onsetTime) {
+        if (!chart) return;
+        
+        const option = chart.getOption();
+        
+        // 获取当前的音高和音符（从pitchData中获取最新的数据点）
+        let currentFreq = 0;
+        let currentNote = '';
+        
+        if (pitchData.length > 0) {
+          const lastPitchData = pitchData[pitchData.length - 1];
+          currentFreq = lastPitchData.y;
+          currentNote = noteData[noteData.length - 1] || '';
+        }
+        
+        // 确保series[2]存在
+        if (!option.series[2]) {
+          // 使用当前音高作为Y轴值，如果没有则使用默认值
+          const yValue = currentFreq > 0 ? currentFreq : 
+            (option.yAxis[0].min ? (option.yAxis[0].min + option.yAxis[0].max) / 2 : 500);
+          
+          option.series[2] = {
+            name: '音频起始点',
+            type: 'scatter',
+            symbol: 'triangle',
+            symbolSize: 12,
+            itemStyle: {
+              color: '#ff5722'
+            },
+            data: [[onsetTime, yValue]],
+            label: {
+              show: true,
+              position: 'top',
+              formatter: function(params) {
+                return currentNote;
+              },
+              fontSize: 12,
+              color: '#ff5722',
+              backgroundColor: 'rgba(255,255,255,0.7)',
+              padding: [2, 4],
+              borderRadius: 3
+            },
+            tooltip: {
+              formatter: function(params) {
+                let result = `音频起始点: ${params.value[0].toFixed(2)} 秒`;
+                if (currentFreq > 0) {
+                  result += `<br/>频率: ${currentFreq.toFixed(1)} Hz`;
+                  if (currentNote) {
+                    result += `<br/>音高: ${currentNote}`;
+                  }
+                }
+                return result;
+              }
+            }
+          };
+        } else {
+          // 使用当前音高作为Y轴值，如果没有则使用之前的值
+          const yValue = currentFreq > 0 ? currentFreq : 
+            (option.series[2].data.length > 0 ? option.series[2].data[0][1] : 
+            (option.yAxis[0].min + option.yAxis[0].max) / 2);
+          
+          // 添加新的onset点
+          option.series[2].data.push([onsetTime, yValue]);
+          
+          // 更新标签
+          if (!option.series[2].label) {
+            option.series[2].label = {
+              show: true,
+              position: 'top',
+              formatter: function(params) {
+                const index = params.dataIndex;
+                return index === option.series[2].data.length - 1 ? currentNote : '';
+              },
+              fontSize: 12,
+              color: '#ff5722',
+              backgroundColor: 'rgba(255,255,255,0.7)',
+              padding: [2, 4],
+              borderRadius: 3
+            };
+          }
+          
+          // 限制显示的onset点数量
+          if (option.series[2].data.length > 20) {
+            option.series[2].data.shift();
+          }
+        }
+        
+        // 添加或更新垂直线
+        if (!option.series[3]) {
+          option.series[3] = {
+            name: '音频起始线',
+            type: 'line',
+            markLine: {
+              symbol: 'none',
+              silent: true,
+              lineStyle: {
+                color: '#ff5722',
+                type: 'dashed',
+                width: 1
+              },
+              data: [
+                [
+                  { xAxis: onsetTime, yAxis: option.yAxis[0].min || 50 },
+                  { xAxis: onsetTime, yAxis: option.yAxis[0].max || 1000 }
+                ]
+              ]
+            },
+            data: []
+          };
+        } else {
+          // 添加新的垂直线
+          if (!option.series[3].markLine) {
+            option.series[3].markLine = {
+              symbol: 'none',
+              silent: true,
+              lineStyle: {
+                color: '#ff5722',
+                type: 'dashed',
+                width: 1
+              },
+              data: []
+            };
+          }
+          
+          option.series[3].markLine.data.push([
+            { xAxis: onsetTime, yAxis: option.yAxis[0].min || 50 },
+            { xAxis: onsetTime, yAxis: option.yAxis[0].max || 1000 }
+          ]);
+          
+          // 限制垂直线数量
+          if (option.series[3].markLine.data.length > 20) {
+            option.series[3].markLine.data.shift();
+          }
+        }
+        
+        // 更新图表
+        chart.setOption(option, true);
+      }
+      
+      // 初始化页面
+      document.addEventListener('DOMContentLoaded', function() {
+        initChart();
+        
+        document.getElementById('startButton').addEventListener('click', startPitchDetection);
+        document.getElementById('stopButton').addEventListener('click', stopPitchDetection);
+        document.getElementById('updateA').addEventListener('click', updateStandardA);
+        document.getElementById('analyzeButton').addEventListener('click', analyzeAudioFile);
+        document.getElementById('audioFile').addEventListener('change', handleFileSelect);
+        
+        // 添加事件监听器
+        document.getElementById('confidenceThreshold').addEventListener('input', function(e) {
+          confidenceThreshold = parseFloat(e.target.value);
+          document.getElementById('confidenceValue').textContent = confidenceThreshold.toFixed(2);
+        });
+        
+        document.getElementById('medianFilterSize').addEventListener('input', function(e) {
+          medianFilterSize = parseInt(e.target.value);
+          document.getElementById('filterValue').textContent = medianFilterSize;
+        });
+      });
+    </script>
+  </body>
+</html>

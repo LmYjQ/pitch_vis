@@ -48,7 +48,13 @@ function initChart() {
 }
 // 更新图表数据
 function updateChart() {
-  if (!myChart) return;
+  if (!myChart) {
+    console.error("图表实例不存在，无法更新图表");
+    return;
+  }
+  
+  console.log("LineCharts - 开始更新图表，接收到的数据:", props.data);
+  
   // 提取所有声部名称
   const voiceNames = [];
   props.data.forEach((item) => {
@@ -58,13 +64,19 @@ function updateChart() {
       }
     });
   });
+  
+  console.log("LineCharts - 检测到的声部:", voiceNames);
+  
   // 按声部分组数据
   const seriesData = voiceNames.map((voiceName) => {
+    const voiceData = props.data.map((item) => item[voiceName] || null);
+    console.log(`LineCharts - 声部${voiceName}数据:`, voiceData);
+    
     return {
       name: `声部${voiceName}音高`,
       type: "line",
       smooth: true,
-      data: props.data.map((item) => item[voiceName] || null), // 如果声部不存在，设为 null
+      data: voiceData, // 如果声部不存在，设为 null
       itemStyle: {
         color: "#5470C6",
       },
@@ -72,6 +84,9 @@ function updateChart() {
       // connectNulls: true, // 连接空值点
     };
   });
+
+  const xAxisData = props.data.map((v) => v.xData);
+  console.log("LineCharts - X轴数据:", xAxisData);
 
   const option = {
     tooltip: {
@@ -111,7 +126,7 @@ function updateChart() {
 
     xAxis: {
       type: "category",
-      data: props.data.map((v) => v.xData),
+      data: xAxisData,
       name: "时间",
     },
     yAxis: [
@@ -146,7 +161,15 @@ function updateChart() {
     ],
     series: seriesData, // 动态生成 series
   };
-  myChart.setOption(option, { notMerge: true });
+  
+  console.log("LineCharts - 设置图表选项:", JSON.stringify(option, null, 2));
+  
+  try {
+    myChart.setOption(option, { notMerge: true });
+    console.log("LineCharts - 图表选项设置成功");
+  } catch (error) {
+    console.error("LineCharts - 设置图表选项时出错:", error);
+  }
 }
 
 // 保持数组长度不超过最大点数
@@ -159,12 +182,14 @@ function updateChart() {
 function changeChartSize() {
   if (myChart) {
     myChart.resize();
+    console.log("LineCharts - 图表大小已调整");
   }
 }
 
 watch(
   () => props.data,
-  () => {
+  (newData, oldData) => {
+    console.log(`LineCharts - 数据变化检测: 新数据长度=${newData.length}, 旧数据长度=${oldData ? oldData.length : 0}`);
     nextTick(() => {
       updateChart();
     });
@@ -172,32 +197,21 @@ watch(
   { deep: true }
 );
 
-// 生成音高刻度
-// function generateNoteScale() {
-//   // 生成从C2到C7的音符刻度
-//   const notes = []
-//   const baseNotes = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
-
-//   for (let octave = 2; octave <= 7; octave++) {
-//     for (let i = 0; i < baseNotes.length; i++) {
-//       notes.push(`${baseNotes[i]}${octave}`)
-//     }
-//   }
-
-//   return notes
-// }
-
 onMounted(() => {
+  console.log("LineCharts - 组件已挂载");
   nextTick(() => {
+    console.log("LineCharts - 初始化图表");
     initChart();
     window.addEventListener("resize", changeChartSize);
   });
 });
 
 onBeforeUnmount(() => {
+  console.log("LineCharts - 组件即将卸载");
   if (myChart) {
     myChart.dispose();
     myChart = null;
+    console.log("LineCharts - 图表实例已销毁");
   }
   window.removeEventListener("resize", changeChartSize);
 });

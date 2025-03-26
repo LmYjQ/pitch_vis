@@ -67,20 +67,38 @@ function updateChart() {
   
   console.log("LineCharts - 检测到的声部:", voiceNames);
   
+  // 颜色数组，用于区分不同声部
+  const colorPalette = [
+    '#5470C6', '#91CC75', '#FAC858', '#EE6666', 
+    '#73C0DE', '#3BA272', '#FC8452', '#9A60B4', 
+    '#ea7ccc', '#4cabce', '#a5e7f0', '#45b97c'
+  ];
+  
   // 按声部分组数据
-  const seriesData = voiceNames.map((voiceName) => {
+  const seriesData = voiceNames.map((voiceName, index) => {
     const voiceData = props.data.map((item) => item[voiceName] || null);
     console.log(`LineCharts - 声部${voiceName}数据:`, voiceData);
     
+    // 获取文件名作为声部名称
+    let seriesName = `声部${voiceName.replace('voice', '')}`;
+    
+    // 如果有全局文件名映射，使用实际文件名
+    if (window.voiceFileNames && window.voiceFileNames[voiceName]) {
+      // 提取文件名（不带路径和扩展名）
+      const fullName = window.voiceFileNames[voiceName];
+      const fileName = fullName.split('\\').pop().split('/').pop();
+      // 如果文件名太长，截断显示
+      seriesName = fileName.length > 20 ? fileName.substring(0, 17) + '...' : fileName;
+    }
+    
     return {
-      name: `声部${voiceName}音高`,
+      name: seriesName,
       type: "line",
       smooth: true,
       data: voiceData, // 如果声部不存在，设为 null
       itemStyle: {
-        color: "#5470C6",
+        color: colorPalette[index % colorPalette.length], // 循环使用颜色
       },
-
       // connectNulls: true, // 连接空值点
     };
   });
@@ -94,13 +112,21 @@ function updateChart() {
       formatter: function (params) {
         let tooltipText = "";
         params.forEach((param) => {
-          const { seriesIndex, value } = param;
-          tooltipText += `声部${seriesIndex + 1}: 频率 ${value.toFixed(
-            1
-          )} Hz; 音高 ${frequencyToNote(value)}\n`;
+          const { seriesName, value, color } = param;
+          if (value) {
+            tooltipText += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>`;
+            tooltipText += `${seriesName}: 频率 ${value.toFixed(1)} Hz; 音高 ${frequencyToNote(value)}<br/>`;
+          }
         });
         return tooltipText;
       },
+    },
+    legend: {
+      type: 'scroll',
+      orient: 'horizontal',
+      right: 10,
+      top: 10,
+      data: seriesData.map(series => series.name)
     },
     grid: {
       left: "5%",

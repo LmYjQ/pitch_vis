@@ -1,6 +1,6 @@
 <template>
-  <h2 style="text-align: center;">音频文件音高监测</h2>
-  <line-charts :data="data" />
+  <h2 style="text-align: center">音频文件音高监测</h2>
+  <line-charts :data="data" :current-time="currentPlayTime" />
   <div class="controls">
     <div>{{ textTip }}</div>
     <div class="settings">
@@ -9,9 +9,23 @@
       <button @click="updateStandardA">更新</button>
     </div>
     <div class="settings" style="margin-top: 15px">
-      <label for="audioFile">上传音频文件: {{ selectedFiles && selectedFiles.length > 0 ? `已选择 ${selectedFiles.length} 个文件` : '未选择文件' }}</label>
+      <label for="audioFile"
+        >上传音频文件:
+        {{
+          selectedFiles && selectedFiles.length > 0
+            ? `已选择 ${selectedFiles.length} 个文件`
+            : "未选择文件"
+        }}</label
+      >
       <input type="file" accept="audio/*" @change="handleFileSelect" multiple />
-      <button @click="analyzeAudioFile" :disabled="!selectedFiles || selectedFiles.length === 0">分析音频</button>
+      <button @click="analyzeAudioFile" :disabled="!selectedFiles || selectedFiles.length === 0">
+        分析音频
+      </button>
+      <!-- 添加播放/暂停按钮 -->
+      <button @click="togglePlayback" :disabled="!audioBuffers || audioBuffers.length === 0">
+        {{ isPlaying ? "暂停" : "播放" }}
+      </button>
+
       <button @click="router.push('/m')">实时检测</button>
     </div>
     <div class="settings" style="margin-top: 15px">
@@ -49,10 +63,10 @@
   </div>
 </template>
 <script setup>
-import { ref } from "vue";
+import { ref, onBeforeUnmount } from "vue";
 import { analyzeAudioBuffer } from "@/utils/analyzeAudio";
-import { useRouter } from 'vue-router'
-const router = useRouter()
+import { useRouter } from "vue-router";
+const router = useRouter();
 let audioContext = null;
 const textTip = ref("等待检测音高...");
 const standardA = ref(440); // 标准音A的频率，默认440Hz
@@ -71,7 +85,14 @@ const data = ref([]);
 // const maxFrequency = 2000
 const bufferSize = 1 << 12;
 
-let audioBuffers = []; // 存储上传的多个音频文件
+const audioBuffers = ref([]); // 存储上传的多个音频文件
+const isPlaying = ref(false);
+const pauseTime = ref(0);
+let playStartTime = 0;
+let sources = [];
+
+const currentPlayTime = ref(0);
+let animationFrameId = null;
 
 // 更新标准音A
 function updateStandardA() {
@@ -83,14 +104,8 @@ function updateStandardA() {
 
 // 处理文件选择
 function handleFileSelect(event) {
-  // 获取选中的文件
   const files = event.target.files;
-  if (files && files.length > 0) {
-    selectedFiles.value = Array.from(files);
-    console.log("选中的文件:", selectedFiles.value);
-  } else {
-    selectedFiles.value = [];
-  }
+  selectedFiles.value = files && files.length > 0 ? Array.from(files) : [];
 }
 
 // 分析上传的音频文件
@@ -102,9 +117,12 @@ async function analyzeAudioFile() {
     return;
   }
 
-  // 重置图表数据
+  // 重置状态
+  stopAudio();
+  isPlaying.value = false;
+  pauseTime.value = 0;
   data.value = [];
-  audioBuffers = [];
+  audioBuffers.value = [];
 
   // 显示加载状态
   textTip.value = "正在分析音频文件...";
@@ -119,15 +137,15 @@ async function analyzeAudioFile() {
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       textTip.value = `正在分析音频文件 ${i + 1}/${files.length}: ${file.name}...`;
-      
+
       // 读取文件
       const arrayBuffer = await file.arrayBuffer();
 
       // 解码音频数据
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      audioBuffers.push({
+      audioBuffers.value.push({
         buffer: audioBuffer,
-        name: file.name
+        name: file.name,
       });
 
       // 分析音频文件
@@ -145,7 +163,6 @@ async function analyzeAudioFile() {
     // 更新完成状态
     const totalPoints = data.value.length;
     textTip.value = `分析完成，共处理 ${files.length} 个文件，生成 ${totalPoints} 个数据点`;
-    
   } catch (error) {
     console.error("分析音频文件时出错:", error);
     alert("分析音频文件时出错: " + error?.message);
@@ -169,43 +186,121 @@ function updateChartWithFileAnalysis(results, fileIndex, fileName) {
   }
 
   // 打印调试信息
-  console.log(`文件 ${fileName} 分析结果: ${results.frequencies.length} 个频率点, ${results.times.length} 个时间点`);
+  console.log(
+    `文件 ${fileName} 分析结果: ${results.frequencies.length} 个频率点, ${results.times.length} 个时间点`
+  );
   console.log(`文件 ${fileName} 有效频率点: ${validFrequencies.length} 个`);
-  console.log(`文件 ${fileName} 频率范围: ${Math.min(...validFrequencies)} - ${Math.max(...validFrequencies)}`);
+  console.log(
+    `文件 ${fileName} 频率范围: ${Math.min(...validFrequencies)} - ${Math.max(...validFrequencies)}`
+  );
   console.log(`文件 ${fileName} 检测到 ${results.onsets.length} 个音频起始点`);
 
   // 创建数据点数组
   const voiceKey = `voice${fileIndex + 1}`;
-  
+
   // 保存文件名到全局变量，用于图例显示
-  if (!window.voiceFileNames) {
-    window.voiceFileNames = {};
-  }
+  window.voiceFileNames = window.voiceFileNames || {};
   window.voiceFileNames[voiceKey] = fileName;
-  
-  for (let i = 0; i < results.times.length; i++) {
+
+  results.times.forEach((time, i) => {
     if (results.frequencies[i] > 0) {
-      const timePoint = results.times[i].toFixed(2);
-      
-      // 查找是否已经存在相同时间点的数据
-      const existingPointIndex = data.value.findIndex(point => point.xData === timePoint);
-      
-      if (existingPointIndex >= 0) {
-        // 如果存在相同时间点，则添加当前声部的数据
-        data.value[existingPointIndex][voiceKey] = results.frequencies[i];
+      // 修改时间点存储为数值
+      const timePoint = Number(time.toFixed(2)); // 转为数值类型
+      const existingPoint = data.value.find(
+        (point) => Math.abs(point.xData - timePoint) < 0.001 // 浮点数精度处理
+      );
+
+      if (existingPoint) {
+        existingPoint[voiceKey] = results.frequencies[i];
       } else {
-        // 如果不存在相同时间点，则创建新的数据点
-        const newPoint = { xData: timePoint };
-        newPoint[voiceKey] = results.frequencies[i];
-        data.value.push(newPoint);
+        data.value.push({
+          xData: timePoint,
+          [voiceKey]: results.frequencies[i],
+        });
       }
     }
-  }
-
+  });
+  // 添加数据排序保证时间顺序
+  data.value.sort((a, b) => a.xData - b.xData);
   // 更新当前音高显示
   const validPoints = results.frequencies.filter((f) => f > 0).length;
-  console.log(`文件 ${fileName} 分析完成，共检测到 ${validPoints} 个有效音高点，${results.onsets.length} 个音频起始点`);
+  console.log(
+    `文件 ${fileName} 分析完成，共检测到 ${validPoints} 个有效音高点，${results.onsets.length} 个音频起始点`
+  );
 }
+// 播放控制
+async function togglePlayback() {
+  if (isPlaying.value) {
+    pauseAudio();
+  } else {
+    await playAudio();
+  }
+}
+
+function updatePlayTime() {
+  if (isPlaying.value) {
+    currentPlayTime.value = audioContext.currentTime - playStartTime + pauseTime.value;
+    animationFrameId = requestAnimationFrame(updatePlayTime);
+  }
+}
+
+async function playAudio() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
+  stopAudio();
+
+  const startTime = audioContext.currentTime;
+  const offset = pauseTime.value;
+
+  let endedCount = 0;
+  sources = audioBuffers.value.map((bufferInfo) => {
+    const source = audioContext.createBufferSource();
+    source.buffer = bufferInfo.buffer;
+    source.connect(audioContext.destination);
+    source.start(startTime, offset);
+    source.onended = () => {
+      endedCount++;
+      if (endedCount === audioBuffers.value.length) {
+        isPlaying.value = false;
+        pauseTime.value = 0;
+      }
+    };
+    return source;
+  });
+
+  playStartTime = startTime;
+  isPlaying.value = true;
+  updatePlayTime(); // 开始更新时间
+}
+
+function pauseAudio() {
+  cancelAnimationFrame(animationFrameId);
+  const elapsed = audioContext.currentTime - playStartTime;
+  pauseTime.value += elapsed;
+  stopAudio();
+  isPlaying.value = false;
+}
+
+function stopAudio() {
+  sources.forEach((source) => {
+    try {
+      source.stop();
+      source.disconnect();
+    } catch (e) {}
+  });
+  sources = [];
+}
+
+onBeforeUnmount(() => {
+  stopAudio();
+  if (audioContext) {
+    audioContext.close();
+  }
+});
 </script>
 
 <style scoped></style>

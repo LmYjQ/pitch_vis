@@ -1,6 +1,6 @@
 <template>
   <h2 style="text-align: center">音频文件音高监测</h2>
-  <line-charts :data="data" :current-time="currentPlayTime" />
+  <line-charts :data="data" :current-time="currentPlayTime" @time-click="handleTimeClick" />
   <div class="controls">
     <div>{{ textTip }}</div>
     <div class="settings">
@@ -43,18 +43,16 @@
           <div>
             <label for="confidenceThreshold">置信度阈值:</label>
             <input
-              type="range"
+              type="text"
               v-model="confidenceThreshold"
-              min="0"
-              max="1"
-              step="0.01"
-              value="0.01"
-            />
+              pattern="[0-9]+(\.[0-9]+)?"
+              title="请输入0到1之间的数字"
+            />  
             <span>{{ confidenceThreshold }}</span>
           </div>
           <div>
             <label for="medianFilterSize">平滑度:</label>
-            <input type="range" v-model="medianFilterSize" min="1" max="15" step="2" value="5" />
+            <input type="range" v-model="medianFilterSize" min="1" max="15" step="1" value="5" />
             <span>{{ medianFilterSize }}</span>
           </div>
           <div>
@@ -262,8 +260,41 @@ async function togglePlayback() {
   }
 }
 
+// 处理图表时间点击事件
+async function handleTimeClick(time) {
+  console.log(`点击了时间点: ${time}秒`);
+  
+  // 确保时间是有效的数字
+  if (typeof time !== 'number' || isNaN(time)) {
+    console.error('收到无效的时间点:', time);
+    return;
+  }
+  
+  // 设置新的播放位置
+  pauseTime.value = Math.max(0, time);
+  console.log(`设置播放位置为: ${pauseTime.value}秒`);
+  
+  // 如果当前正在播放，则从新位置继续播放
+  if (isPlaying.value) {
+    console.log('当前正在播放，将从新位置继续播放');
+    // 先完全停止当前播放
+    isPlaying.value = false; // 先设置为非播放状态，避免状态混乱
+    cancelAnimationFrame(animationFrameId);
+    stopAudio();
+    // 短暂延迟后重新开始播放
+    setTimeout(async () => {
+      await playAudio();
+    }, 50);
+  } else {
+    // 更新当前时间显示，但不播放
+    console.log('当前未播放，仅更新时间指示器位置');
+    currentPlayTime.value = pauseTime.value;
+  }
+}
+
 function updatePlayTime() {
   if (isPlaying.value) {
+    // 计算当前播放时间
     currentPlayTime.value = audioContext.currentTime - playStartTime + pauseTime.value;
     animationFrameId = requestAnimationFrame(updatePlayTime);
   }
@@ -280,6 +311,7 @@ async function playAudio() {
 
   const startTime = audioContext.currentTime;
   const offset = pauseTime.value;
+  console.log(`开始播放: 当前时间=${startTime}, 偏移量=${offset}秒`);
 
   let endedCount = 0;
   sources = audioBuffers.value.map((bufferInfo) => {
@@ -299,7 +331,13 @@ async function playAudio() {
 
   playStartTime = startTime;
   isPlaying.value = true;
-  updatePlayTime(); // 开始更新时间
+  
+  // 重置当前播放时间以确保从正确位置开始更新
+  currentPlayTime.value = pauseTime.value;
+  
+  // 开始更新时间
+  cancelAnimationFrame(animationFrameId); // 确保没有多个动画帧请求
+  updatePlayTime();
 }
 
 function pauseAudio() {

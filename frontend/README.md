@@ -39,3 +39,6 @@ npm run test:unit
 ```sh
 npm run lint
 ```
+
+
+[aubio API doc](https://aubio.org/doc/latest/pitch_8h.html)

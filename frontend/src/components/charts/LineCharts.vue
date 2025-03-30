@@ -36,6 +36,10 @@ const props = defineProps({
   ]
 */
 });
+
+// 定义事件
+const emit = defineEmits(['timeClick']);
+
 // const maxPoints = 100;
 let myChart = null;
 // 在setup作用域顶部定义voiceNames引用
@@ -105,6 +109,51 @@ function initChart() {
   if (!myChart) {
     myChart = echarts.init(chartDom);
   }
+
+  // 添加点击事件
+  myChart.on('click', (params) => {
+    console.log('图表点击事件:', params);
+    
+    // 支持点击任何区域，不仅限于x轴
+    if (params.componentType === 'xAxis') {
+      console.log('点击了X轴:', params.value);
+      emit('timeClick', params.value);
+    } else if (params.componentType === 'series') {
+      // 点击数据点时，使用x轴的值
+      console.log('点击了数据点:', params.data[0]);
+      emit('timeClick', params.data[0]);
+    } else {
+      // 点击其他区域时，尝试获取点击位置对应的x轴值
+      try {
+        // 获取点击位置的像素坐标
+        const pixelX = params.offsetX;
+        const pixelY = params.offsetY;
+        
+        // 将像素坐标转换为数据坐标
+        const pointInGrid = myChart.convertFromPixel({xAxisIndex: 0, yAxisIndex: 0}, [pixelX, pixelY]);
+        if (pointInGrid && pointInGrid[0] !== undefined) {
+          console.log('点击区域转换为时间:', pointInGrid[0]);
+          emit('timeClick', pointInGrid[0]);
+        }
+      } catch (error) {
+        console.error('转换点击坐标失败:', error);
+      }
+    }
+  });
+  
+  // 添加额外的区域点击事件
+  myChart.getZr().on('click', (event) => {
+    const pointInPixel = [event.offsetX, event.offsetY];
+    try {
+      const pointInGrid = myChart.convertFromPixel({xAxisIndex: 0, yAxisIndex: 0}, pointInPixel);
+      if (pointInGrid && pointInGrid[0] !== undefined) {
+        console.log('区域点击转换为时间:', pointInGrid[0]);
+        emit('timeClick', pointInGrid[0]);
+      }
+    } catch (error) {
+      console.error('区域点击坐标转换失败:', error);
+    }
+  });
 
   updateChart();
 }
@@ -204,6 +253,10 @@ function updateChart() {
   const option = {
     tooltip: {
       trigger: "axis",
+      axisPointer: {
+        type: 'line',
+        snap: true
+      },
       formatter: (params) => {
         const validParams = params.filter(
           (p) => p.seriesName !== "CURRENT_TIME_MARKER" && p.data?.[1] !== undefined
@@ -258,6 +311,14 @@ function updateChart() {
       },
       min: (value) => Math.floor(value.min), // 动态最小值
       max: Math.max(...props.data.map((item) => item.xData)), // 动态最大值
+      axisPointer: {
+        show: true,
+        snap: true,
+        label: {
+          show: true,
+          formatter: (params) => `${params.value.toFixed(2)}s`
+        }
+      }
     },
     yAxis: {
       type: "log",

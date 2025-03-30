@@ -47,17 +47,17 @@ export async function analyzeAudioBuffer(
 
   // 用于收集所有音频段落的数组
   const audioSegments = [];
-  const algorithm = "yinfft"; // 使用的音高检测算法
+  const algorithm = "yin"; // 使用的音高检测算法
   const hopSize = Math.floor(bufferSize / 3);
   const dirName = `${fileName.replace(/\.[^/.]+$/, "")}_${algorithm}_${bufferSize}_${hopSize}`;
 
   // 分析整个音频文件
   const channels = buffer.numberOfChannels;
   const audioData = buffer.getChannelData(0); // 使用第一个声道
-  const totalFrames = Math.floor(audioData.length / hopSize);
+  const totalFrames = Math.floor((audioData.length - bufferSize) / hopSize);
 
   console.log(
-    `开始分析音频: 采样率=${buffer.sampleRate}Hz, 通道数=${channels}, 总帧数=${totalFrames}`
+    `开始分析音频: 音频时长=${audioData.length / buffer.sampleRate}秒, 采样率=${buffer.sampleRate}Hz, bufferSize=${bufferSize}, 通道数=${channels}, onset总帧数=${totalFrames}`
   );
 
   // 创建临时Float32Array用于处理
@@ -89,7 +89,8 @@ export async function analyzeAudioBuffer(
     }
   }
 
-  console.log(`检测到 ${onsetTimes.length} 个音频起始点`);
+  const onsetTimesStr = onsetTimes.map((onset) => onset.time).join(', ');
+  console.log(`检测到 ${onsetTimes.length} 个音频起始点, onsetTimes=${onsetTimesStr}`);
   results.onsets = onsetTimes.map((onset) => onset.time);
 
   // 如果没有检测到onset，则添加一个起始点
@@ -137,14 +138,13 @@ export async function analyzeAudioBuffer(
     // 记录有效的segment索引
     validSegments.push(segmentIndex);
 
+    // 对当前段进行帧分析
+    const segmentFrames = Math.floor(segmentLength / hopSize);
     console.log(
       `分析片段 ${segmentIndex + 1}/${onsetTimes.length - 1}: ${startOnset.time.toFixed(
         2
-      )}s - ${endOnset.time.toFixed(2)}s (长度: ${segmentLength} 样本)`
+      )}s - ${endOnset.time.toFixed(2)}s (长度: ${segmentLength} 样本) 当前段的帧数: ${segmentFrames}`
     );
-
-    // 对当前段进行帧分析
-    const segmentFrames = Math.floor(segmentLength / hopSize);
 
     // 用于存储当前段的主要频率
     let segmentFrequencies = [];
@@ -182,16 +182,19 @@ export async function analyzeAudioBuffer(
       results.segments.push(segmentIndex);
 
       // 只保留频率大于0的结果，忽略置信度
-      if (frequency > 0) {
-        results.frequencies.push(frequency);
-        results.confidences.push(confidence);
-      } else {
-        // 对于低置信度的结果，频率设为0
-        results.frequencies.push(0);
-        results.confidences.push(confidence);
-      }
+      // if (frequency > 0) {
+      //   results.frequencies.push(frequency);
+      //   results.confidences.push(confidence);
+      // } else {
+      //   // 对于低置信度的结果，频率设为0
+      //   results.frequencies.push(0);
+      //   results.confidences.push(confidence);
+      // }
+      results.frequencies.push(frequency);
+      results.confidences.push(confidence);
     }
-
+    const segmentFrequenciesAndConfidencesStr = segmentFrequencies.map((f, i) => `${f}:${segmentConfidences[i]}`).join(', ');
+    console.log(`分析完成, segmentIndex=${segmentIndex}, segmentFrequenciesAndConfidences=${segmentFrequenciesAndConfidencesStr}`)
     // 如果需要保存段落
     if (saveSegments && segmentFrames > 0) {
       // 计算段落的主要频率（取中位数或平均值）

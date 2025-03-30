@@ -57,6 +57,11 @@
             <input type="range" v-model="medianFilterSize" min="1" max="15" step="2" value="5" />
             <span>{{ medianFilterSize }}</span>
           </div>
+          <div>
+            <label for="saveSegments">保存音频段落:</label>
+            <input type="checkbox" v-model="saveSegments" id="saveSegments" />
+            <span>{{ saveSegments ? '是' : '否' }}</span>
+          </div>
         </div>
       </details>
     </div>
@@ -73,6 +78,7 @@ const standardA = ref(440); // 标准音A的频率，默认440Hz
 const selectedFiles = ref([]); // 用于存储选中的多个文件
 const confidenceThreshold = ref(0.01); // 音高检测的置信度阈值，大幅降低以捕获更多数据点
 const medianFilterSize = ref(5); // 中值滤波器大小
+const saveSegments = ref(false); // 是否保存音频段落
 const data = ref([]);
 /* data 数据说明，xData横坐标时间，voice为不同声部频率
   data:[
@@ -153,7 +159,9 @@ async function analyzeAudioFile() {
         audioBuffer,
         bufferSize,
         confidenceThreshold.value,
-        medianFilterSize.value
+        medianFilterSize.value,
+        saveSegments.value,
+        file.name
       );
 
       // 更新图表，传入文件索引用于区分不同声部
@@ -200,7 +208,16 @@ function updateChartWithFileAnalysis(results, fileIndex, fileName) {
 
   // 保存文件名到全局变量，用于图例显示
   window.voiceFileNames = window.voiceFileNames || {};
-  window.voiceFileNames[voiceKey] = fileName;
+  window.voiceSegmentInfo = window.voiceSegmentInfo || {};
+  
+  // 记录当前文件的segment信息
+  window.voiceSegmentInfo[voiceKey] = {
+    fileName: fileName,
+    segmentCount: results.onsets ? results.onsets.length : 0
+  };
+  
+  // 将文件名改为显示segment编号的格式
+  window.voiceFileNames[voiceKey] = `Segment ${fileIndex + 1}`;
 
   results.times.forEach((time, i) => {
     if (results.frequencies[i] > 0) {
@@ -210,13 +227,21 @@ function updateChartWithFileAnalysis(results, fileIndex, fileName) {
         (point) => Math.abs(point.xData - timePoint) < 0.001 // 浮点数精度处理
       );
 
+      // 获取当前点的segment编号（直接使用原始的segment编号）
+      const segmentIndex = results.segments[i];
+
       if (existingPoint) {
         existingPoint[voiceKey] = results.frequencies[i];
+        // 添加segment编号信息
+        existingPoint[`${voiceKey}_segment`] = segmentIndex;
       } else {
-        data.value.push({
+        const newPoint = {
           xData: timePoint,
           [voiceKey]: results.frequencies[i],
-        });
+          // 添加segment编号信息
+          [`${voiceKey}_segment`]: segmentIndex
+        };
+        data.value.push(newPoint);
       }
     }
   });

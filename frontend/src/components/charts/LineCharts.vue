@@ -116,10 +116,14 @@ function updateChart() {
   }
 
   // ======================= 数据预处理 =======================
-  // 提取所有声部名称（voice1, voice2...）
+  // 提取所有声部名称（voice1, voice2...），排除segment信息
   voiceNames.value = [
     ...new Set(
-      props.data.flatMap((item) => Object.keys(item).filter((key) => key.startsWith("voice")))
+      props.data.flatMap((item) => 
+        Object.keys(item).filter((key) => 
+          key.startsWith("voice") && !key.includes("_segment")
+        )
+      )
     ),
   ];
   console.log("检测到的声部:", voiceNames.value);
@@ -209,22 +213,39 @@ function updateChart() {
 
         return validParams
           .map(
-            (p) => `
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <span style="
-              display: inline-block;
-              width: 10px;
-              height: 10px;
-              border-radius: 50%;
-              background: ${p.color};
-            "></span>
-            <span>
-              ${p.seriesName}:
-              ${p.data[1].toFixed(1)} Hz
-              (${frequencyToNote(p.data[1])})
-            </span>
-          </div>
-        `
+            (p) => {
+              // 获取声部编号
+              const voiceKey = voiceNames.value[p.seriesIndex];
+              
+              // 获取当前点的时间
+              const timePoint = p.data[0];
+              
+              // 查找对应的数据点以获取segment编号
+              const dataPoint = props.data.find(
+                (point) => Math.abs(point.xData - timePoint) < 0.001
+              );
+              
+              // 获取当前点的segment编号
+              const segmentIndex = dataPoint ? dataPoint[`${voiceKey}_segment`] : 0;
+              
+              return `
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="
+                  display: inline-block;
+                  width: 10px;
+                  height: 10px;
+                  border-radius: 50%;
+                  background: ${p.color};
+                "></span>
+                <span>
+                  ${p.seriesName}:
+                  ${p.data[1].toFixed(1)} Hz
+                  (${frequencyToNote(p.data[1])})
+                  (段编号: ${segmentIndex})
+                </span>
+              </div>
+            `;
+            }
           )
           .join("");
       },

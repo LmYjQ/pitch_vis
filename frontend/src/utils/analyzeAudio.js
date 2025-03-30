@@ -1,11 +1,16 @@
 import aubioModule from "aubiojs";
 import { frequencyToNote } from "@/utils/common";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
+
 // 分析AudioBuffer中的音高
 export async function analyzeAudioBuffer(
   buffer,
   bufferSize,
   confidenceThreshold,
-  medianFilterSize
+  medianFilterSize,
+  saveSegments = false,
+  fileName = "audio"
 ) {
   // 初始化Aubio
   const aubio = await aubioModule();
@@ -37,12 +42,18 @@ export async function analyzeAudioBuffer(
     notes: [],
     confidences: [],
     onsets: [], // 新增onset时间点数组
+    segments: [], // 新增segment编号数组
   };
+
+  // 用于收集所有音频段落的数组
+  const audioSegments = [];
+  const algorithm = "yinfft"; // 使用的音高检测算法
+  const hopSize = Math.floor(bufferSize / 3);
+  const dirName = `${fileName.replace(/\.[^/.]+$/, "")}_${algorithm}_${bufferSize}_${hopSize}`;
 
   // 分析整个音频文件
   const channels = buffer.numberOfChannels;
   const audioData = buffer.getChannelData(0); // 使用第一个声道
-  const hopSize = Math.floor(bufferSize / 3);
   const totalFrames = Math.floor(audioData.length / hopSize);
 
   console.log(
@@ -101,6 +112,9 @@ export async function analyzeAudioBuffer(
   let rawFrequencies = [];
   let rawConfidences = [];
 
+  // 保存有效的segment索引，用于映射
+  const validSegments = [];
+
   for (let segmentIndex = 0; segmentIndex < onsetTimes.length - 1; segmentIndex++) {
     const startOnset = onsetTimes[segmentIndex];
     const endOnset = onsetTimes[segmentIndex + 1];
@@ -120,6 +134,9 @@ export async function analyzeAudioBuffer(
       continue;
     }
 
+    // 记录有效的segment索引
+    validSegments.push(segmentIndex);
+
     console.log(
       `分析片段 ${segmentIndex + 1}/${onsetTimes.length - 1}: ${startOnset.time.toFixed(
         2
@@ -128,6 +145,10 @@ export async function analyzeAudioBuffer(
 
     // 对当前段进行帧分析
     const segmentFrames = Math.floor(segmentLength / hopSize);
+
+    // 用于存储当前段的主要频率
+    let segmentFrequencies = [];
+    let segmentConfidences = [];
 
     for (let i = 0; i < segmentFrames; i++) {
       // 填充临时缓冲区
@@ -149,9 +170,16 @@ export async function analyzeAudioBuffer(
       rawFrequencies.push(frequency);
       rawConfidences.push(confidence);
 
+      // 记录当前段的频率和置信度
+      segmentFrequencies.push(frequency);
+      segmentConfidences.push(confidence);
+
       // 记录时间点
       const timeInSeconds = frameStartIndex / buffer.sampleRate;
       results.times.push(timeInSeconds);
+
+      // 记录当前点所属的segment编号（使用原始的segmentIndex）
+      results.segments.push(segmentIndex);
 
       // 只保留频率大于0的结果，忽略置信度
       if (frequency > 0) {
@@ -162,6 +190,37 @@ export async function analyzeAudioBuffer(
         results.frequencies.push(0);
         results.confidences.push(confidence);
       }
+    }
+
+    // 如果需要保存段落
+    if (saveSegments && segmentFrames > 0) {
+      // 计算段落的主要频率（取中位数或平均值）
+      const validFrequencies = segmentFrequencies.filter((f) => f > 0);
+      let dominantFrequency = 0;
+      if (validFrequencies.length > 0) {
+        // 使用中位数作为主要频率
+        validFrequencies.sort((a, b) => a - b);
+        dominantFrequency = validFrequencies[Math.floor(validFrequencies.length / 2)];
+      }
+
+      // 创建该段的音频数据
+      const segmentAudioBuffer = new Float32Array(segmentLength);
+      for (let i = 0; i < segmentLength; i++) {
+        segmentAudioBuffer[i] = audioData[segmentStartIndex + i];
+      }
+
+      // 格式化文件名
+      const formattedFrequency = dominantFrequency.toFixed(2);
+      const formattedStartTime = startOnset.time.toFixed(3);
+      const formattedEndTime = endOnset.time.toFixed(3);
+      const segmentFileName = `${segmentIndex}_${formattedFrequency}_${formattedStartTime}_${formattedEndTime}.wav`;
+
+      // 收集音频段落信息
+      audioSegments.push({
+        buffer: segmentAudioBuffer,
+        sampleRate: buffer.sampleRate,
+        fileName: segmentFileName,
+      });
     }
   }
 
@@ -191,7 +250,80 @@ export async function analyzeAudioBuffer(
   // 计算音符
   results.notes = results.frequencies.map((freq) => (freq > 0 ? frequencyToNote(freq) : ""));
 
+  // 如果需要保存段落，且有段落需要保存，则创建ZIP文件
+  if (saveSegments && audioSegments.length > 0) {
+    await createAndDownloadZip(audioSegments, dirName);
+  }
+
   return results;
+}
+
+// 创建并下载ZIP文件
+async function createAndDownloadZip(audioSegments, dirName) {
+  console.log(`创建ZIP文件，包含 ${audioSegments.length} 个音频段落`);
+
+  const zip = new JSZip();
+  const folder = zip.folder(dirName);
+
+  // 添加每个音频段落到ZIP文件
+  for (let i = 0; i < audioSegments.length; i++) {
+    const segment = audioSegments[i];
+    const wavBuffer = createWavFile(segment.buffer, segment.sampleRate);
+    folder.file(segment.fileName, wavBuffer);
+  }
+
+  // 生成ZIP文件并下载
+  const zipBlob = await zip.generateAsync({ type: "blob" });
+  saveAs(zipBlob, `${dirName}.zip`);
+
+  console.log(`ZIP文件创建完成: ${dirName}.zip`);
+}
+
+// 创建WAV文件
+function createWavFile(audioData, sampleRate) {
+  // WAV文件头
+  const numChannels = 1; // 单声道
+  const bitsPerSample = 16;
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = audioData.length * (bitsPerSample / 8);
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  // 写入WAV头
+  writeString(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(view, 8, "WAVE");
+  writeString(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM格式
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  // 写入音频数据
+  const volume = 0.8;
+  let index = 44;
+  for (let i = 0; i < audioData.length; i++) {
+    // 将Float32转换为Int16
+    const sample = Math.max(-1, Math.min(1, audioData[i])) * volume;
+    const value = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+    view.setInt16(index, value, true);
+    index += 2;
+  }
+
+  return buffer;
+}
+
+// 辅助函数：写入字符串到DataView
+function writeString(view, offset, string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
 }
 
 // 中值滤波函数

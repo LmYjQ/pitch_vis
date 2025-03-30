@@ -2,7 +2,7 @@
   <div :id="id" ref="lineChartRef" :style="{ height: height, width: width }" />
 </template>
 <script setup>
-import { defineOptions, onMounted, nextTick, watch, onBeforeUnmount } from "vue";
+import { ref, defineOptions, onMounted, nextTick, watch, onBeforeUnmount } from "vue";
 import * as echarts from "echarts";
 import { frequencyToNote } from "@/utils/common";
 defineOptions({ name: "LineCharts" });
@@ -19,6 +19,10 @@ const props = defineProps({
     type: String,
     default: "70%",
   },
+  currentTime: {
+    type: Number,
+    default: 0,
+  },
   data: {
     type: Array,
     required: true,
@@ -34,6 +38,64 @@ const props = defineProps({
 });
 // const maxPoints = 100;
 let myChart = null;
+// 在setup作用域顶部定义voiceNames引用
+const voiceNames = ref([]);
+const currentNotes = ref({}); // 用于存储当前音高
+// ======================= 时间监听优化 =======================
+watch(
+  () => props.currentTime,
+  (newTime) => {
+    const closestPoint = props.data.find((point) => Math.abs(point.xData - newTime) < 0.1);
+
+    currentNotes.value = Object.keys(closestPoint || {})
+      .filter((key) => key.startsWith("voice"))
+      .reduce((notes, key) => {
+        notes[key] = frequencyToNote(closestPoint[key]);
+        return notes;
+      }, {});
+
+    if (!myChart) return;
+
+    // 仅更新标记线位置
+    myChart.setOption(
+      {
+        series: [
+          {
+            name: "CURRENT_TIME_MARKER",
+            markLine: { data: [{ xAxis: newTime }] },
+          },
+        ],
+      },
+      {
+        seriesIndex: [voiceNames.value.length], // 标记线是最后一个系列
+        notMerge: false,
+        lazyUpdate: true,
+      }
+    );
+
+    // 自动滚动到当前时间区域
+    if (myChart.getOption().dataZoom?.[1]) {
+      const timeRange = Math.max(...props.data.map((item) => item.xData)) || 1;
+      const lookAhead = 10; // 前瞻时间(秒)
+
+      // 计算可见区域
+      const visibleStart = Math.max(0, newTime - lookAhead);
+      const visibleEnd = Math.min(timeRange, newTime + lookAhead);
+
+      // 计算百分比时添加容错
+      const safeTimeRange = timeRange > 0 ? timeRange : 1;
+      const startPercent = (visibleStart / safeTimeRange) * 100;
+      const endPercent = (visibleEnd / safeTimeRange) * 100;
+
+      myChart.dispatchAction({
+        type: "dataZoom",
+        dataZoomIndex: 1, // 对应slider类型的dataZoom
+        start: startPercent,
+        end: endPercent,
+      });
+    }
+  }
+);
 // 初始化ECharts
 function initChart() {
   const chartDom = document.getElementById(props.id);
@@ -52,149 +114,187 @@ function updateChart() {
     console.error("图表实例不存在，无法更新图表");
     return;
   }
-  
-  console.log("LineCharts - 开始更新图表，接收到的数据:", props.data);
-  
-  // 提取所有声部名称
-  const voiceNames = [];
-  props.data.forEach((item) => {
-    Object.keys(item).forEach((key) => {
-      if (key.startsWith("voice") && !voiceNames.includes(key)) {
-        voiceNames.push(key);
-      }
-    });
-  });
-  
-  console.log("LineCharts - 检测到的声部:", voiceNames);
-  
-  // 颜色数组，用于区分不同声部
-  const colorPalette = [
-    '#5470C6', '#91CC75', '#FAC858', '#EE6666', 
-    '#73C0DE', '#3BA272', '#FC8452', '#9A60B4', 
-    '#ea7ccc', '#4cabce', '#a5e7f0', '#45b97c'
+
+  // ======================= 数据预处理 =======================
+  // 提取所有声部名称（voice1, voice2...）
+  voiceNames.value = [
+    ...new Set(
+      props.data.flatMap((item) => Object.keys(item).filter((key) => key.startsWith("voice")))
+    ),
   ];
-  
-  // 按声部分组数据
-  const seriesData = voiceNames.map((voiceName, index) => {
-    const voiceData = props.data.map((item) => item[voiceName] || null);
-    console.log(`LineCharts - 声部${voiceName}数据:`, voiceData);
-    
-    // 获取文件名作为声部名称
-    let seriesName = `声部${voiceName.replace('voice', '')}`;
-    
-    // 如果有全局文件名映射，使用实际文件名
-    if (window.voiceFileNames && window.voiceFileNames[voiceName]) {
-      // 提取文件名（不带路径和扩展名）
-      const fullName = window.voiceFileNames[voiceName];
-      const fileName = fullName.split('\\').pop().split('/').pop();
-      // 如果文件名太长，截断显示
-      seriesName = fileName.length > 20 ? fileName.substring(0, 17) + '...' : fileName;
+  console.log("检测到的声部:", voiceNames.value);
+
+  // ======================= 颜色配置 =======================
+  const colorPalette = [
+    "#5470C6",
+    "#91CC75",
+    "#FAC858",
+    "#EE6666",
+    "#73C0DE",
+    "#3BA272",
+    "#FC8452",
+    "#9A60B4",
+    "#ea7ccc",
+    "#4cabce",
+    "#a5e7f0",
+    "#45b97c",
+  ];
+
+  // ======================= 构建声部系列 =======================
+  const voiceSeries = voiceNames.value.map((voiceKey, index) => {
+    // 处理文件名显示
+    let seriesName = `声部${voiceKey.replace("voice", "")}`;
+    if (window.voiceFileNames?.[voiceKey]) {
+      const fullName = window.voiceFileNames[voiceKey];
+      const fileName = fullName.split(/[\\/]/).pop(); // 跨平台路径处理
+      seriesName = fileName.length > 20 ? `${fileName.substring(0, 17)}...` : fileName;
     }
-    
+
+    // 构建数据点（过滤无效值）
+    const validData = props.data
+      .filter((item) => item[voiceKey] > 0)
+      .map((item) => [item.xData, item[voiceKey]]);
+
     return {
       name: seriesName,
       type: "line",
       smooth: true,
-      data: voiceData, // 如果声部不存在，设为 null
-      itemStyle: {
-        color: colorPalette[index % colorPalette.length], // 循环使用颜色
-      },
-      // connectNulls: true, // 连接空值点
+      data: validData,
+      itemStyle: { color: colorPalette[index % colorPalette.length] },
+      symbol: "none", // 隐藏数据点符号
+      connectNulls: false,
     };
   });
 
-  const xAxisData = props.data.map((v) => v.xData);
-  console.log("LineCharts - X轴数据:", xAxisData);
+  // ======================= 时间标记线系列 =======================
+  const timeMarkerSeries = {
+    name: "CURRENT_TIME_MARKER",
+    type: "line",
+    data: [],
+    markLine: {
+      silent: true,
+      symbol: "none",
+      lineStyle: {
+        color: "#FF2222",
+        width: 2,
+        type: "solid",
+      },
+      data: [
+        {
+          xAxis: props.currentTime,
+          yAxis: "min", // 纵向贯穿整个图表
+        },
+      ],
+      label: {
+        show: true,
+        formatter: () => Object.values(currentNotes.value).join(" / ") || "--",
+      },
+      animation: false, // 禁用动画避免延迟
+    },
+  };
 
+  // ======================= 合并所有系列 =======================
+  const allSeries = [...voiceSeries, timeMarkerSeries];
+
+  // ======================= 构建完整配置 =======================
   const option = {
     tooltip: {
       trigger: "axis",
-      formatter: function (params) {
-        let tooltipText = "";
-        params.forEach((param) => {
-          const { seriesName, value, color } = param;
-          if (value) {
-            tooltipText += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>`;
-            tooltipText += `${seriesName}: 频率 ${value.toFixed(1)} Hz; 音高 ${frequencyToNote(value)}<br/>`;
-          }
-        });
-        return tooltipText;
+      formatter: (params) => {
+        const validParams = params.filter(
+          (p) => p.seriesName !== "CURRENT_TIME_MARKER" && p.data?.[1] !== undefined
+        );
+
+        if (validParams.length === 0) return "无有效数据";
+
+        return validParams
+          .map(
+            (p) => `
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="
+              display: inline-block;
+              width: 10px;
+              height: 10px;
+              border-radius: 50%;
+              background: ${p.color};
+            "></span>
+            <span>
+              ${p.seriesName}:
+              ${p.data[1].toFixed(1)} Hz
+              (${frequencyToNote(p.data[1])})
+            </span>
+          </div>
+        `
+          )
+          .join("");
       },
     },
-    legend: {
-      type: 'scroll',
-      orient: 'horizontal',
-      right: 10,
-      top: 10,
-      data: seriesData.map(series => series.name)
+    xAxis: {
+      type: "value",
+      name: "时间 (秒)",
+      axisLabel: {
+        formatter: (value) => (value % 1 === 0 ? `${value}s` : `${value.toFixed(1)}s`),
+      },
+      min: (value) => Math.floor(value.min), // 动态最小值
+      max: Math.max(...props.data.map((item) => item.xData)), // 动态最大值
+    },
+    yAxis: {
+      type: "log",
+      name: "音高",
+      min: 50,
+      max: 2000,
+      logBase: 2,
+      axisLabel: {
+        formatter: (value) => {
+          return frequencyToNote(value);
+        },
+      },
+      splitLine: { show: true, lineStyle: { type: "dashed" } },
     },
     grid: {
-      left: "5%",
-      right: "5%",
-      bottom: "10%",
+      left: "6%",
+      right: "4%",
+      bottom: "14%",
       containLabel: true,
     },
-
     dataZoom: [
       {
         type: "inside",
         start: 0,
         end: 100,
+        zoomLock: true, // 防止过度缩放
       },
       {
         show: true,
         type: "slider",
-        y: "90%",
+        height: 20,
+        bottom: 25,
         start: 0,
         end: 100,
       },
     ],
-
-    xAxis: {
-      type: "category",
-      data: xAxisData,
-      name: "时间",
-    },
-    yAxis: [
-      {
-        type: "log",
-        scale: true,
-        name: "频率 (Hz)",
-        min: 50, // 最低频率设为50Hz，约等于G1音
-        max: 2000, // 最高频率设为2000Hz，约等于B6音
-        position: "left",
-        logBase: 2, // 以2为底的对数，符合音乐中八度的关系
-        axisLine: {
-          lineStyle: {
-            color: "#1982ff",
-            width: 1, //这里是为了突出显示加上的
-          },
-        },
-        axisLabel: {
-          //字体颜色
-          show: true,
-
-          formatter: "{value} Hz",
-        },
-        splitLine: {
-          show: true,
-          lineStyle: {
-            type: "dashed",
-          },
-        },
-        boundaryGap: [0.2, 0.2],
-      },
-    ],
-    series: seriesData, // 动态生成 series
+    series: allSeries,
   };
-  
-  console.log("LineCharts - 设置图表选项:", JSON.stringify(option, null, 2));
-  
+
+  // ======================= 应用配置 =======================
   try {
-    myChart.setOption(option, { notMerge: true });
-    console.log("LineCharts - 图表选项设置成功");
+    // 智能合并配置（保留动画状态）
+    myChart.setOption(option, {
+      notMerge: false,
+      replaceMerge: ["series"], // 完全替换系列数组
+      lazyUpdate: true, // 提升性能
+    });
+
+    // 强制重渲染标记线
+    myChart.dispatchAction({
+      type: "markLine",
+      seriesIndex: allSeries.length - 1, // 最后一个是标记线系列
+      data: [{ xAxis: props.currentTime }],
+    });
+
+    console.log("图表更新成功，当前时间:", props.currentTime);
   } catch (error) {
-    console.error("LineCharts - 设置图表选项时出错:", error);
+    console.error("图表更新失败:", error);
   }
 }
 
@@ -215,7 +315,11 @@ function changeChartSize() {
 watch(
   () => props.data,
   (newData, oldData) => {
-    console.log(`LineCharts - 数据变化检测: 新数据长度=${newData.length}, 旧数据长度=${oldData ? oldData.length : 0}`);
+    console.log(
+      `LineCharts - 数据变化检测: 新数据长度=${newData.length}, 旧数据长度=${
+        oldData ? oldData.length : 0
+      }`
+    );
     nextTick(() => {
       updateChart();
     });

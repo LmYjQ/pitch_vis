@@ -292,7 +292,7 @@ function updateChart() {
       data: [{ xAxis: props.currentTime }],
     });
 
-    console.log("图表更新成功，当前时间:", props.currentTime);
+    // console.log("图表更新成功，当前时间:", props.currentTime);
   } catch (error) {
     console.error("图表更新失败:", error);
   }
@@ -315,11 +315,11 @@ function changeChartSize() {
 watch(
   () => props.data,
   (newData, oldData) => {
-    console.log(
-      `LineCharts - 数据变化检测: 新数据长度=${newData.length}, 旧数据长度=${
-        oldData ? oldData.length : 0
-      }`
-    );
+    // console.log(
+    //   `LineCharts - 数据变化检测: 新数据长度=${newData.length}, 旧数据长度=${
+    //     oldData ? oldData.length : 0
+    //   }`
+    // );
     nextTick(() => {
       updateChart();
     });

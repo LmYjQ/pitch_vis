@@ -94,6 +94,8 @@ const pitchAlgorithm = ref("yin"); // 音高检测算法，默认为fcomb
 const bufferSize = ref(4096); // 缓冲区大小
 const hopSize = ref(1024); // Hop Size
 const data = ref([]);
+// 存储所有检测到的音高数据，包括音高、置信度和振幅
+const allPitchData = ref([]);
 /* data 数据说明，xData横坐标时间，voice为不同声部频率
   data:[
      { xData: 1, voice1: 400, voice2: 500 },
@@ -214,6 +216,10 @@ async function startPitchDetection() {
       const frequency = pitchDetector.do(audioData);
       const confidence = pitchDetector.getConfidence ? pitchDetector.getConfidence() : 1.0;
       
+      // 计算当前音频数据的振幅
+      const sum = audioData.reduce((a, b) => a + Math.abs(b), 0);
+      const amplitude = sum / audioData.length;
+      
       if (pitchDetector.getPitch) {
         console.log(`原始频率: ${frequency}Hz, 置信度: ${confidence}`);
       }
@@ -247,6 +253,15 @@ async function startPitchDetection() {
         )} Hz (${note})\n置信度: ${confidence.toFixed(2)}`;
         // 更新图表数据
         updateChart(smoothedFreq, currentTime);
+        
+        // 存储音高数据
+        allPitchData.value.push({
+          time: currentTime,
+          frequency: smoothedFreq,
+          note: note,
+          confidence: confidence,
+          amplitude: amplitude
+        });
       } else {
         // console.log(`频率或置信度低于阈值，忽略此数据点 (频率=${frequency}, 置信度=${confidence}, 阈值=${confidenceThreshold.value})`);
       }
@@ -269,6 +284,16 @@ function stopPitchDetection() {
 
   console.log("停止音高检测...");
   console.log(`停止时数据点数量: ${data.value.length}，停止检测时间: ${new Date().toLocaleString()}`);
+  
+  // 在控制台显示所有检测到的音高数据
+  console.log("所有检测到的音高数据:");
+  console.log("时间(秒)\t频率(Hz)\t音符\t置信度\t振幅");
+  allPitchData.value.forEach(item => {
+    console.log(`${item.time.toFixed(2)}\t${item.frequency.toFixed(1)}\t${item.note}\t${item.confidence.toFixed(3)}\t${item.amplitude.toFixed(5)}`);
+  });
+  
+  // 重置音高数据
+  allPitchData.value = [];
 
   isRunning = false;
 

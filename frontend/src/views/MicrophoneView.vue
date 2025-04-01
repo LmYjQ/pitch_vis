@@ -88,9 +88,9 @@ const textTip = ref("等待检测音高...");
 const standardA = ref(440); // 标准音A的频率，默认440Hz
 const disableStartButton = ref(false);
 const disableStopButton = ref(false);
-const confidenceThreshold = ref(0.1); // 音高检测的置信度阈值
+const confidenceThreshold = ref(0.5); // 音高检测的置信度阈值
 const medianFilterSize = ref(5); // 中值滤波器大小
-const pitchAlgorithm = ref("fcomb"); // 音高检测算法，默认为fcomb
+const pitchAlgorithm = ref("yin"); // 音高检测算法，默认为fcomb
 const bufferSize = ref(4096); // 缓冲区大小
 const hopSize = ref(1024); // Hop Size
 const data = ref([]);
@@ -165,12 +165,12 @@ async function startPitchDetection() {
     console.log(`音高检测器创建成功，算法: ${pitchAlgorithm.value}, buffersize: ${bufferSize.value}, hopSize: ${hopSize.value}, 采样率: ${audioContext.sampleRate}`);
 
     // 设置置信度阈值
-    if (pitchDetector.setTolerance) {
-      pitchDetector.setTolerance(1.0 - confidenceThreshold.value);
-      console.log(`设置音高检测器容差: ${1.0 - confidenceThreshold.value}`);
-    } else {
-      console.warn("警告: 音高检测器不支持设置容差");
-    }
+    // if (pitchDetector.setTolerance) {
+    //   pitchDetector.setTolerance(1.0 - confidenceThreshold.value);
+    //   console.log(`设置音高检测器容差: ${1.0 - confidenceThreshold.value}`);
+    // } else {
+    //   console.warn("警告: 音高检测器不支持设置容差");
+    // }
 
     // 用于平滑处理的历史频率数据
     const freqHistory = [];
@@ -194,10 +194,10 @@ async function startPitchDetection() {
       const currentTime = audioContext.currentTime - startTime;
       
       // 每秒记录一次处理状态，避免日志过多
-      // if (currentTime - lastLogTime >= 1.0) {
-      //   console.log(`音频处理中: 已处理${processCount}个缓冲区, 当前时间: ${currentTime.toFixed(2)}秒`);
-      //   lastLogTime = currentTime;
-      // }
+      if (currentTime - lastLogTime >= 1.0) {
+        console.log(`音频处理中: 已处理${processCount}个缓冲区, 当前时间: ${currentTime.toFixed(2)}秒`);
+        lastLogTime = currentTime;
+      }
 
       const audioData = event.inputBuffer.getChannelData(0);
       
@@ -218,7 +218,7 @@ async function startPitchDetection() {
         console.log(`原始频率: ${frequency}Hz, 置信度: ${confidence}`);
       }
 
-      // 只处理置信度高于阈值的结果
+      // 只处理置信度高于阈值的结果 && confidence >= confidenceThreshold.value
       if (frequency > 0 && confidence >= confidenceThreshold.value) {
         // 添加到历史数据
         freqHistory.push(frequency);
@@ -240,7 +240,7 @@ async function startPitchDetection() {
         */
 
         const note = frequencyToNote(smoothedFreq, standardA.value);
-        console.log(`转换为音符: ${note} (基于标准音A=${standardA.value}Hz)`);
+        console.log(`转换为音符: ${note} (基于标准音A=${standardA.value}Hz) 置信度: ${confidence}`);
         
         textTip.value = `当前音高: ${smoothedFreq.toFixed(
           1
@@ -268,7 +268,7 @@ function stopPitchDetection() {
   if (!isRunning) return;
 
   console.log("停止音高检测...");
-  console.log(`停止时数据点数量: ${data.value.length}`);
+  console.log(`停止时数据点数量: ${data.value.length}，停止检测时间: ${new Date().toLocaleString()}`);
 
   isRunning = false;
 

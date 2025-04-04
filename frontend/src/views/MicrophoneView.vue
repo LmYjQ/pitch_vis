@@ -1,6 +1,6 @@
 <template>
   <h2 style="text-align: center">实时音高检测</h2>
-  <line-charts :data="data" />
+  <DynamicsLineCharts :data="data" :isRealTime="true" />
   <div class="controls">
     <div>{{ textTip }}</div>
     <div class="settings">
@@ -25,13 +25,7 @@
         >
           <div>
             <label for="confidenceThreshold">置信度阈值:</label>
-            <input
-              type="number"
-              v-model="confidenceThreshold"
-              min="0"
-              max="1"
-              step="0.01"
-            />
+            <input type="number" v-model="confidenceThreshold" min="0" max="1" step="0.01" />
           </div>
           <div>
             <label for="medianFilterSize">平滑度:</label>
@@ -51,28 +45,15 @@
           </div>
           <div>
             <label for="bufferSize">Buffer Size:</label>
-            <input
-              type="number"
-              v-model="bufferSize"
-              min="1024"
-              max="16384"
-              step="1024"
-            />
+            <input type="number" v-model="bufferSize" min="1024" max="16384" step="1024" />
           </div>
           <div>
             <label for="hopSize">Hop Size:</label>
-            <input
-              type="number"
-              v-model="hopSize"
-              min="256"
-              max="4096"
-              step="256"
-            />
+            <input type="number" v-model="hopSize" min="256" max="4096" step="256" />
           </div>
         </div>
       </details>
     </div>
-
   </div>
 </template>
 <script setup>
@@ -150,21 +131,25 @@ async function startPitchDetection() {
     scriptProcessor = audioContext.createScriptProcessor(bufferSize.value, 1, 1);
     microphone.connect(scriptProcessor);
     scriptProcessor.connect(audioContext.destination);
-    console.log(`音频上下文创建成功, 采样率: ${audioContext.sampleRate}Hz, 缓冲区大小: ${bufferSize.value}`);
+    console.log(
+      `音频上下文创建成功, 采样率: ${audioContext.sampleRate}Hz, 缓冲区大小: ${bufferSize.value}`
+    );
     console.log("音频处理链: 麦克风 -> scriptProcessor -> destination");
 
     // 使用Aubio检测音高
     console.log("正在加载Aubio模块...");
     const aubio = await aubioModule();
     console.log("Aubio模块加载成功");
-    
+
     const pitchDetector = new aubio.Pitch(
       pitchAlgorithm.value,
       bufferSize.value,
       hopSize.value,
       audioContext.sampleRate
     );
-    console.log(`音高检测器创建成功，算法: ${pitchAlgorithm.value}, buffersize: ${bufferSize.value}, hopSize: ${hopSize.value}, 采样率: ${audioContext.sampleRate}`);
+    console.log(
+      `音高检测器创建成功，算法: ${pitchAlgorithm.value}, buffersize: ${bufferSize.value}, hopSize: ${hopSize.value}, 采样率: ${audioContext.sampleRate}`
+    );
 
     // 设置置信度阈值
     // if (pitchDetector.setTolerance) {
@@ -180,46 +165,55 @@ async function startPitchDetection() {
     // 开始时间
     const startTime = audioContext.currentTime;
     console.log(`开始记录时间: ${startTime}`);
-    
+
     // 清空现有数据
     data.value = [];
     console.log("数据已重置");
-    
+
     // 添加音频处理计数器，用于调试
     let processCount = 0;
     let lastLogTime = 0;
-    
+
     scriptProcessor.onaudioprocess = (event) => {
       if (!isRunning) return;
 
       processCount++;
       const currentTime = audioContext.currentTime - startTime;
-      
+
       // 每秒记录一次处理状态，避免日志过多
       if (currentTime - lastLogTime >= 1.0) {
-        console.log(`音频处理中: 已处理${processCount}个缓冲区, 当前时间: ${currentTime.toFixed(2)}秒`);
+        console.log(
+          `音频处理中: 已处理${processCount}个缓冲区, 当前时间: ${currentTime.toFixed(2)}秒`
+        );
         lastLogTime = currentTime;
       }
 
       const audioData = event.inputBuffer.getChannelData(0);
-      
+
       // 每5秒记录一次音频数据的统计信息
-      if (Math.floor(currentTime) % 5 === 0 && Math.floor(currentTime) !== Math.floor(lastLogTime)) {
+      if (
+        Math.floor(currentTime) % 5 === 0 &&
+        Math.floor(currentTime) !== Math.floor(lastLogTime)
+      ) {
         const sum = audioData.reduce((a, b) => a + Math.abs(b), 0);
         const avg = sum / audioData.length;
-        const max = Math.max(...audioData.map(v => Math.abs(v)));
-        console.log(`音频数据统计: 平均振幅=${avg.toFixed(4)}, 最大振幅=${max.toFixed(4)}, 样本数=${audioData.length}`);
+        const max = Math.max(...audioData.map((v) => Math.abs(v)));
+        console.log(
+          `音频数据统计: 平均振幅=${avg.toFixed(4)}, 最大振幅=${max.toFixed(4)}, 样本数=${
+            audioData.length
+          }`
+        );
       }
-      
+
       // 检测音高
       console.log("正在执行音高检测...");
       const frequency = pitchDetector.do(audioData);
       const confidence = pitchDetector.getConfidence ? pitchDetector.getConfidence() : 1.0;
-      
+
       // 计算当前音频数据的振幅
       const sum = audioData.reduce((a, b) => a + Math.abs(b), 0);
       const amplitude = sum / audioData.length;
-      
+
       if (pitchDetector.getPitch) {
         console.log(`原始频率: ${frequency}Hz, 置信度: ${confidence}`);
       }
@@ -228,7 +222,7 @@ async function startPitchDetection() {
       if (frequency > 0 && confidence >= confidenceThreshold.value) {
         // 添加到历史数据
         freqHistory.push(frequency);
-        console.log(`频率历史记录: [${freqHistory.join(', ')}]`);
+        console.log(`频率历史记录: [${freqHistory.join(", ")}]`);
 
         // 保持历史数据长度
         if (freqHistory.length > medianFilterSize.value) {
@@ -247,20 +241,20 @@ async function startPitchDetection() {
 
         const note = frequencyToNote(smoothedFreq, standardA.value);
         console.log(`转换为音符: ${note} (基于标准音A=${standardA.value}Hz) 置信度: ${confidence}`);
-        
+
         textTip.value = `当前音高: ${smoothedFreq.toFixed(
           1
         )} Hz (${note})\n置信度: ${confidence.toFixed(2)}`;
         // 更新图表数据
         updateChart(smoothedFreq, currentTime);
-        
+
         // 存储音高数据
         allPitchData.value.push({
           time: currentTime,
           frequency: smoothedFreq,
           note: note,
           confidence: confidence,
-          amplitude: amplitude
+          amplitude: amplitude,
         });
       } else {
         // console.log(`频率或置信度低于阈值，忽略此数据点 (频率=${frequency}, 置信度=${confidence}, 阈值=${confidenceThreshold.value})`);
@@ -283,15 +277,21 @@ function stopPitchDetection() {
   if (!isRunning) return;
 
   console.log("停止音高检测...");
-  console.log(`停止时数据点数量: ${data.value.length}，停止检测时间: ${new Date().toLocaleString()}`);
-  
+  console.log(
+    `停止时数据点数量: ${data.value.length}，停止检测时间: ${new Date().toLocaleString()}`
+  );
+
   // 在控制台显示所有检测到的音高数据
   console.log("所有检测到的音高数据:");
   console.log("时间(秒)\t频率(Hz)\t音符\t置信度\t振幅");
-  allPitchData.value.forEach(item => {
-    console.log(`${item.time.toFixed(2)}\t${item.frequency.toFixed(1)}\t${item.note}\t${item.confidence.toFixed(3)}\t${item.amplitude.toFixed(5)}`);
+  allPitchData.value.forEach((item) => {
+    console.log(
+      `${item.time.toFixed(2)}\t${item.frequency.toFixed(1)}\t${
+        item.note
+      }\t${item.confidence.toFixed(3)}\t${item.amplitude.toFixed(5)}`
+    );
   });
-  
+
   // 重置音高数据
   allPitchData.value = [];
 
@@ -308,11 +308,14 @@ function stopPitchDetection() {
   }
 
   if (audioContext) {
-    audioContext.close().then(() => {
-      console.log("音频上下文已关闭");
-    }).catch(err => {
-      console.error("关闭音频上下文时出错:", err);
-    });
+    audioContext
+      .close()
+      .then(() => {
+        console.log("音频上下文已关闭");
+      })
+      .catch((err) => {
+        console.error("关闭音频上下文时出错:", err);
+      });
     audioContext = null;
   }
 

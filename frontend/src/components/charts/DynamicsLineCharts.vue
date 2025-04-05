@@ -36,7 +36,7 @@ const props = defineProps({
   ]
 */
 });
-// const MAX_POINTS = 100;
+const MAX_POINTS = 50;
 // ======================= 颜色配置 =======================
 const COLOR_PALETTE = [
   "#5470C6",
@@ -53,6 +53,7 @@ const COLOR_PALETTE = [
   "#45b97c",
 ];
 let myChart = null;
+const displayedData = ref([]);
 // 获取声部显示名称
 const getVoiceName = (voiceKey) => {
   if (window.voiceFileNames?.[voiceKey]) {
@@ -62,30 +63,26 @@ const getVoiceName = (voiceKey) => {
   return `声部${voiceKey.replace("voice", "")}`;
 };
 
-const generateSeries = () => {
-  // 获取所有存在的声部key
+const generateSeries = (data) => {
   const voices = new Set();
-  props.data.forEach((point) => {
+  data.forEach((point) => {
     Object.keys(point).forEach((key) => {
       if (key.startsWith("voice")) voices.add(key);
     });
   });
 
-  return Array.from(voices).map((voiceKey, index) => {
-    return {
-      name: getVoiceName(voiceKey),
-      type: "line",
-      smooth: true, // 现在可以生效
-      data: props.data.map((point) => point[voiceKey] || null), // 用null处理数据缺失
-      itemStyle: { color: COLOR_PALETTE[index % COLOR_PALETTE.length] },
-      symbol: "circle",
-      symbolSize: 4,
-      connectNulls: false, // 根据需求调整是否连接空数据
-      showSymbol: props.data.length < 50, // 数据点多时隐藏符号
-    };
-  });
+  return Array.from(voices).map((voiceKey, index) => ({
+    name: getVoiceName(voiceKey),
+    type: "line",
+    smooth: true,
+    data: data.map((point) => point[voiceKey] || null),
+    itemStyle: { color: COLOR_PALETTE[index % COLOR_PALETTE.length] },
+    symbol: "circle",
+    symbolSize: 4,
+    connectNulls: false,
+    showSymbol: data.length < 50,
+  }));
 };
-
 // 初始化ECharts
 function initChart() {
   const chartDom = document.getElementById(props.id);
@@ -104,7 +101,11 @@ function updateChart() {
     console.error("图表实例不存在，无法更新图表");
     return;
   }
-
+  // 截断数据并保留两位小数
+  displayedData.value = props.data.slice(-MAX_POINTS).map((item) => ({
+    ...item,
+    xData: Number(item.xData.toFixed(2)),
+  }));
   // ======================= 构建完整配置 =======================
   const option = {
     tooltip: {
@@ -130,7 +131,7 @@ function updateChart() {
     },
     xAxis: {
       type: "category",
-      data: props.data.map((d) => d.xData), // 直接使用原始数据
+      data: displayedData.value.map((d) => d.xData.toFixed(2)),
       name: "时间 (秒)",
     },
     yAxis: {
@@ -155,20 +156,26 @@ function updateChart() {
     dataZoom: [
       {
         type: "inside",
-        start: 0,
+        start: Math.max(
+          0,
+          ((displayedData.value.length - MAX_POINTS) / displayedData.value.length) * 100
+        ),
         end: 100,
-        zoomLock: true, // 防止过度缩放
+        zoomLock: true,
       },
       {
         show: true,
         type: "slider",
         height: 20,
         bottom: 25,
-        start: 0,
+        start: Math.max(
+          0,
+          ((displayedData.value.length - MAX_POINTS) / displayedData.value.length) * 100
+        ),
         end: 100,
       },
     ],
-    series: [...generateSeries()],
+    series: generateSeries(displayedData.value),
   };
 
   myChart.setOption(option, {
@@ -196,6 +203,15 @@ watch(
     );
     nextTick(() => {
       updateChart();
+      // 自动滚动到最新数据
+      myChart?.dispatchAction({
+        type: "dataZoom",
+        start: Math.max(
+          0,
+          ((displayedData.value.length - MAX_POINTS) / displayedData.value.length) * 100
+        ),
+        end: 100,
+      });
     });
   },
   { deep: true }

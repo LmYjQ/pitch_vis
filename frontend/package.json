@@ -11,6 +11,7 @@
     "lint": "eslint . --fix"
   },
   "dependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.0.0",
     "aubiojs": "^0.2.1",
     "echarts": "^5.6.0",
     "pinia": "^3.0.1",

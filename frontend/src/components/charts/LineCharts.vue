@@ -198,6 +198,9 @@ function updateChart() {
 
   // ======================= 构建完整配置 =======================
   const option = {
+    legend: {
+        right: 20,
+    },
     tooltip: {
       trigger: "axis",
       formatter: (params) => {
@@ -262,7 +265,7 @@ function updateChart() {
         type: "inside",
         start: 0,
         end: 100,
-        zoomLock: true, // 防止过度缩放
+        // zoomLock: true, // 防止过度缩放
       },
       {
         show: true,
